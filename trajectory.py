@@ -11,8 +11,6 @@ from compute import (
 )
 from typing import Dict, Tuple
 
-n_combinations = None
-
 class TrajectoryGenerator(ABC):
     """Abstract base class for trajectory generators"""
     def __init__(self, params: Dict, UAV_data: Dict):
@@ -185,10 +183,9 @@ class StraightLineTrajectory(TrajectoryGenerator):
     def __init__(self, params=None, UAV_data=None):
         super().__init__(params, UAV_data)
 
-
     def generate_path(self, start_point, end_point, FLT_data, Uidx, candidate_positions, params):
         """
-        Génère une trajectoire en ligne droite entre deux points
+        Génère une trajectoire en ligne droite géodésique entre deux points
         
         Args:
             start_point (dict): Point de départ {latitude, longitude, altitude}
@@ -198,16 +195,42 @@ class StraightLineTrajectory(TrajectoryGenerator):
         Returns:
             dict: Points de trajectoire {latitude: [], longitude: [], altitude: []}
         """
-        num_points = params.get('num_points', 100)
-        LBz = self.params['altitude_lower_bound']
-        UBz = self.params['altitude_upper_bound']
-        
-        # Interpolation linéaire entre les points
-        lat = np.linspace(start_point['latitude'], end_point['latitude'], num_points)
-        lon = np.linspace(start_point['longitude'], end_point['longitude'], num_points)
+        num_points = 100
+        # Conversion en radians
+        lat1 = np.radians(start_point['latitude'])
+        lon1 = np.radians(start_point['longitude'])
+        lat2 = np.radians(end_point['latitude'])
+        lon2 = np.radians(end_point['longitude'])
+
+        # Rayon moyen de la Terre en mètres
+        R = 6371000
+
+        # Calcul de la distance orthodromique (loi des haversines)
+        dlat = lat2 - lat1
+        dlon = lon2 - lon1
+        a = np.sin(dlat/2)**2 + np.cos(lat1)*np.cos(lat2)*np.sin(dlon/2)**2
+        c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1-a))
+        distance = R * c
+
+        # Calcul du cap initial
+        y = np.sin(dlon) * np.cos(lat2)
+        x = np.cos(lat1)*np.sin(lat2) - np.sin(lat1)*np.cos(lat2)*np.cos(dlon)
+        initial_bearing = np.arctan2(y, x)
+        initial_bearing_deg = (np.degrees(initial_bearing) + 360) % 360
+
+        # Génération des points intermédiaires
+        fractions = np.linspace(0, 1, num_points)
+        latitudes = []
+        longitudes = []
+        for f in fractions:
+            d = distance * f
+            dest = get_destination_from_range_and_bearing(
+                start_point, d, initial_bearing_deg
+            )
+            latitudes.append(dest['latitude'])
+            longitudes.append(dest['longitude'])
         alt = np.linspace(start_point['altitude'], end_point['altitude'], num_points)
-        
-        return {'latitude': lat.tolist(), 'longitude': lon.tolist(), 'altitude': alt.tolist()}
+        return {'latitude': latitudes, 'longitude': longitudes, 'altitude': alt.tolist()}
 
 class CircularTrajectory(TrajectoryGenerator):
     """Circular trajectory generator"""
@@ -320,3 +343,35 @@ class PythagoreanHodographPath(TrajectoryGenerator):
     def _evaluate_ph_curve(self, control_points, t):
         # Évaluation de la courbe PH
         pass  # À implémenter
+
+def generate_all_trajectories(start_point, end_point, FLT_data, Uidx, params, UAV_data):
+    """
+    Génère toutes les trajectoires possibles (droit, courbe, Dubins 3D, PH) entre deux points.
+    Retourne un dictionnaire avec chaque type de trajectoire.
+    """
+    # Générateur ligne droite
+    straight_traj = StraightLineTrajectory(params, UAV_data)
+    straight = straight_traj.generate_path(start_point, end_point, FLT_data, Uidx, None, params)
+
+    # Générateur courbe circulaire
+    circular_traj = CircularTrajectory(params, UAV_data)
+    circular = circular_traj.generate_path(start_point, end_point, params)
+
+    # Générateur Dubins 3D
+    dubins_traj = DubinsPath3D(params, UAV_data)
+    # Pour Dubins, il faut fournir les headings (cap) de départ/arrivée dans params
+    dubins_params = params.copy()
+    dubins_params.setdefault('start_heading', FLT_data[Uidx]['bearing'] if FLT_data and Uidx is not None else 0)
+    dubins_params.setdefault('end_heading', 0)
+    dubins = dubins_traj.generate_path(start_point, end_point, dubins_params)
+
+    # Générateur Pythagorean Hodograph
+    ph_traj = PythagoreanHodographPath(params, UAV_data)
+    ph = ph_traj.generate_path(start_point, end_point, params)
+
+    return {
+        'straight': straight,
+        'circular': circular,
+        'dubins': dubins,
+        'pythagorean_hodograph': ph
+    }

@@ -1,6 +1,5 @@
 # ---------- EXAMPLE ----------
 
-from math import pi
 import numpy as np
 from GoToWP import gotoWaypoint
 from compute import get_destination_from_range_and_bearing
@@ -66,9 +65,6 @@ FLT_track = {k: {} for k in range(nUAVs)}
 FLT_track_keys = ['latitude', 'longitude', 'altitude', 'bearing', 'battery_capacity', 'flight_time', 'flight_mode']
 FLT_conditions = {k: {} for k in range(nUAVs)}
 
-# Initialization of waypoint indices for each UAV
-current_wp_indices = {k: 0 for k in range(nUAVs)}
-
 for u in range(nUAVs):
     FLT_track[u] = dict()
     for keys in FLT_track_keys:
@@ -98,4 +94,5 @@ GOAL_WPs['latitude'] = np.random.uniform(params['latitude_lower_bound'], params[
 GOAL_WPs['longitude'] = np.random.uniform(params['longitude_lower_bound'], params['longitude_upper_bound'], 10).tolist()
 
 Uidx = 0 # ID of UAV
-FLT_track, FLT_conditions, current_wp_indices[Uidx] = gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_data, current_wp_indices[Uidx])
+
+FLT_track, FLT_conditions = gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_data)

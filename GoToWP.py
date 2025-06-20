@@ -207,22 +207,33 @@ def lineXline(pA, pB):
 
 def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_data, current_wp_idx):
     """
-    Generates and selects the best trajectory for a given UAV considering physical, energy, and safety constraints,
-    then updates its position and flight conditions. Uses TrajectoryEvaluator to select the optimal path.
-
+    Guides a UAV towards its next waypoint while considering flight dynamics, energy constraints, and collision avoidance.
+    This function computes candidate trajectories for a UAV based on its current flight mode (glide or engine), 
+    evaluates each candidate for safety (collision avoidance with other UAVs), energy consumption, and distance to the goal, 
+    and selects the optimal trajectory. The UAV's state and flight conditions are updated accordingly.
     Args:
-        FLT_track (dict): History of UAV positions and states.
-        FLT_conditions (dict): Current flight conditions of UAVs.
-        GOAL_WPs (dict): Target waypoints (latitude, longitude).
-        nUAVs (int): Total number of UAVs.
-        Uidx (int): Index of the UAV to process.
-        params (dict): Simulation parameters.
-        UAV_data (dict): Physical parameters of the UAV.
-        current_wp_idx (int): Index of the current waypoint to follow in GOAL_WPs.
-
+        FLT_track (list of dict): Flight track history for all UAVs, containing lists of latitude, longitude, altitude, etc.
+        FLT_conditions (list of dict): Current flight conditions for all UAVs (airspeed, flight mode, etc.).
+        GOAL_WPs (dict): Dictionary of goal waypoints with keys 'latitude', 'longitude', and optionally 'altitude'.
+        nUAVs (int): Total number of UAVs in the simulation.
+        Uidx (int): Index of the UAV to update.
+        params (dict): Simulation and UAV parameters (altitude bounds, time step, safe distance, etc.).
+        UAV_data (dict): UAV-specific data (performance, limits, etc.).
+        current_wp_idx (int): Index of the current target waypoint for the UAV.
     Returns:
-        tuple: (FLT_track, FLT_conditions, current_wp_idx) updated for the processed UAV.
+        tuple: Updated (FLT_track, FLT_conditions, current_wp_idx)
+            - FLT_track (list of dict): Updated flight track for all UAVs.
+            - FLT_conditions (list of dict): Updated flight conditions for all UAVs.
+            - current_wp_idx (int): Updated index of the current waypoint for the UAV.
+    Notes:
+        - The function assumes several helper functions are available, such as compute_distance, get_sink_rate, 
+          get_power_consumption, get_destination_from_range_and_bearing, geographic_to_cartesian, cartesian_to_geographic, 
+          lineXline, and find_min_index.
+        - The function handles both 'glide' and 'engine' flight modes.
+        - Collision avoidance is performed by predicting the future positions of other UAVs and checking for conflicts.
+        - The function normalizes and combines multiple cost criteria to select the best candidate trajectory.
     """
+    
     # Definition
     VO_flag = list()
     PO_flag = list()

@@ -305,12 +305,12 @@ def gotoWaypoint(FLT_track: Dict, FLT_conditions: Dict, GOAL_WPs: Dict,
         return FLT_track, FLT_conditions, current_wp_idx
     
     # Identify other UAVs (obstacles)
-    obstacle_uavs = [i for i in range(nUAVs) if i != Uidx]
+    ObstacleUAVs = np.concatenate([np.arange(Uidx), np.arange(Uidx+1, nUAVs)]).tolist()
     
     # Evaluate safety and select the best trajectory
     safety_flags = _evaluate_trajectory_safety(candidates, flight_data, Uidx, 
-                                             obstacle_uavs, optimizer)
-    
+                                             ObstacleUAVs, optimizer)
+
     best_idx = _select_best_trajectory(candidates, safety_flags, target_wp, 
                                      flight_data[Uidx], current_wp_idx, GOAL_WPs)
     
