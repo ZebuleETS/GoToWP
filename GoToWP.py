@@ -254,9 +254,7 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
     max_velocity = UAV_data['max_airspeed']
     safe_dist = params['safe_distance']
     HorizonLength = params['horizon_length']
-    ObstacleUAVs = np.arange(nUAVs)
-    ObstacleUAVs = np.delete(ObstacleUAVs, Uidx).tolist()
-    #ObstacleUAVs = [i for i in range(nUAVs) if i != Uidx]
+    ObstacleUAVs = np.concatenate([np.arange(Uidx), np.arange(Uidx+1, nUAVs)]).tolist()
 
     # Current position and target waypoint
     current_pos = {
