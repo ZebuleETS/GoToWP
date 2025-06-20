@@ -1,4 +1,5 @@
 from math import cos, sin, pi, sqrt, atan, atan2
+from typing import Dict, Tuple
 import numpy as np
 import warnings
 from compute import (
@@ -503,4 +504,33 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
     FLT_conditions[Uidx]['airspeed'] = candidate_sol['airspeed'][idx]
     FLT_conditions[Uidx]['flight_path_angle'] = candidate_sol['flight_path_angle'][idx]
 
+    return FLT_track, FLT_conditions, current_wp_idx
+
+def gotoWaypointMulti(FLT_track: Dict, FLT_conditions: Dict, GOAL_WPs: Dict, 
+                    nUAVs: int, params: Dict, UAV_data: Dict, 
+                    current_wp_idx: Dict[int, int]) -> Tuple[Dict, Dict, Dict[int, int]]:
+    """
+    Gère et contrôle plusieurs UAVs simultanément, en suivant et en mettant à jour leur progression vers leurs waypoints respectifs.
+
+    Args:
+        FLT_track (dict): Historique des positions et états des UAVs.
+        FLT_conditions (dict): Conditions de vol actuelles des UAVs.
+        GOAL_WPs (dict): Waypoints cibles (latitude, longitude).
+        nUAVs (int): Nombre total de UAVs.
+        params (dict): Paramètres de simulation.
+        UAV_data (dict): Paramètres physiques du UAV (identiques pour tous ou par UAV).
+        current_wp_indices (dict): Dictionnaire {Uidx: index_wp_courant} pour chaque UAV.
+
+    Returns:
+        tuple: (FLT_track, FLT_conditions, current_wp_indices) mis à jour pour tous les UAVs traités.
+    """
+    for Uidx in range(nUAVs):
+        # Récupérer l'index du waypoint courant pour ce UAV
+        wp_idx = current_wp_idx.get(Uidx, 0)
+        # Appeler la logique existante pour un seul UAV
+        FLT_track, FLT_conditions, new_wp_idx = gotoWaypoint(
+            FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_data, wp_idx
+        )
+        # Mettre à jour l'index du waypoint pour ce UAV
+        current_wp_idx[Uidx] = new_wp_idx
     return FLT_track, FLT_conditions, current_wp_idx
