@@ -2,6 +2,7 @@ import numpy as np
 from math import pi, sqrt
 from scipy.interpolate import CubicSpline
 from abc import ABC, abstractmethod
+from GoToWP import compute_bearing, compute_distance
 from compute import (
     cartesian_to_geographic,
     geographic_to_cartesian,
@@ -10,8 +11,6 @@ from compute import (
     get_destination_from_range_and_bearing
 )
 from typing import Dict, Tuple
-
-n_combinations = None
 
 class TrajectoryGenerator(ABC):
     """Abstract base class for trajectory generators"""
@@ -185,10 +184,9 @@ class StraightLineTrajectory(TrajectoryGenerator):
     def __init__(self, params=None, UAV_data=None):
         super().__init__(params, UAV_data)
 
-
     def generate_path(self, start_point, end_point, FLT_data, Uidx, candidate_positions, params):
         """
-        Génère une trajectoire en ligne droite entre deux points
+        Génère une trajectoire en ligne droite géodésique entre deux points
         
         Args:
             start_point (dict): Point de départ {latitude, longitude, altitude}
@@ -199,87 +197,144 @@ class StraightLineTrajectory(TrajectoryGenerator):
             dict: Points de trajectoire {latitude: [], longitude: [], altitude: []}
         """
         num_points = params.get('num_points', 100)
-        LBz = self.params['altitude_lower_bound']
-        UBz = self.params['altitude_upper_bound']
         
-        # Interpolation linéaire entre les points
-        lat = np.linspace(start_point['latitude'], end_point['latitude'], num_points)
-        lon = np.linspace(start_point['longitude'], end_point['longitude'], num_points)
+        distance = compute_distance(start_point, end_point)[0]
+        initial_bearing = compute_bearing(start_point, end_point)[0]
+
+        # Génération des points intermédiaires
+        fractions = np.linspace(0, 1, num_points)
+        latitudes = []
+        longitudes = []
+        for f in fractions:
+            d = distance * f
+            dest = get_destination_from_range_and_bearing(
+                start_point, d, initial_bearing
+            )
+            latitudes.append(dest['latitude'])
+            longitudes.append(dest['longitude'])
         alt = np.linspace(start_point['altitude'], end_point['altitude'], num_points)
-        
-        return {'latitude': lat.tolist(), 'longitude': lon.tolist(), 'altitude': alt.tolist()}
+        return {'latitude': latitudes, 'longitude': longitudes, 'altitude': alt.tolist()}
 
 class CircularTrajectory(TrajectoryGenerator):
-    """Circular trajectory generator"""
-    
-    def generate_path(self, start_point, end_point, params):
+    """Circular trajectory generator utilisant les fonctions utilitaires du projet"""
+    def __init__(self, params=None, UAV_data=None):
+        super().__init__(params, UAV_data)
+
+    def generate_path(self, start_point, end_point, FLT_data=None, Uidx=None, candidate_positions=None, params=None):
+        """
+        Génère une trajectoire circulaire géodésiques entre deux points en utilisant les fonctions utilitaires.
+        Args:
+            start_point (dict): Point de départ {latitude, longitude, altitude}
+            end_point (dict): Point d'arrivée {latitude, longitude, altitude}
+            params (dict): Paramètres UAV et simulation 
+        Returns:
+            dict: Points de trajectoire {latitude: [], longitude: [], altitude: []}
+        """
         num_points = params.get('num_points', 100)
         radius = params.get('radius', 100)  # rayon en mètres
-        
-        # Calcul du centre du cercle
-        center_lat = (start_point['latitude'] + end_point['latitude']) / 2
-        center_lon = (start_point['longitude'] + end_point['longitude']) / 2
-        
+
+        # Calcul du centre du cercle (milieu géodésique)
+        distance = compute_distance(start_point, end_point)[0]
+        initial_bearing = compute_bearing(start_point, end_point)[0]
+        center_distance = distance / 2
+        center_bearing = initial_bearing
+        center_point_lat, center_point_lon = get_destination_from_range_and_bearing(
+            start_point, center_distance, center_bearing)
+        center_point = {
+            'latitude': center_point_lat,
+            'longitude': center_point_lon,
+            'altitude': (start_point['altitude'] + end_point['altitude']) / 2
+        }
+
         # Génération des points sur le cercle
-        angles = np.linspace(0, 2*pi, num_points)
-        lat = center_lat + (radius/111319.9) * np.cos(angles)  # conversion approximative en degrés
-        lon = center_lon + (radius/(111319.9*np.cos(center_lat))) * np.sin(angles)
-        
-        # Interpolation de l'altitude
-        alt = np.linspace(start_point['altitude'], end_point['altitude'], num_points)
-        
-        return {'latitude': lat.tolist(), 'longitude': lon.tolist(), 'altitude': alt.tolist()}
+        angles = np.linspace(0, 2 * pi, num_points)
+        latitudes = []
+        longitudes = []
+        for angle in angles:
+            # Pour chaque angle, calculer la position sur le cercle
+            lat, lon = get_destination_from_range_and_bearing(
+                center_point, radius, angle)
+            latitudes.append(lat)
+            longitudes.append(lon)
+        altitudes = np.linspace(start_point['altitude'], end_point['altitude'], num_points)
+        return {'latitude': latitudes, 'longitude': longitudes, 'altitude': altitudes.tolist()}
 
 class DubinsPath3D(TrajectoryGenerator):
     """3D Dubins path trajectory generator"""
     
     def __init__(self):
         super().__init__(params=None, UAV_data=None)
-        self.params = {'num_points': 100}
         self.min_turn_radius = 30  # rayon de virage minimum en mètres
 
-    def generate_path(self, start_point, end_point, params):
+    def generate_path(self, start_point, end_point, FLT_data, params):
         """
-        Génère une trajectoire Dubins 3D optimisée
-        
+        Génère une trajectoire Dubins 3D entre deux points avec deux virages et un segment droit.
         Args:
-            start_point (dict): Point de départ avec format FLT_data (inclut bearing)
-            end_point (dict): Point d'arrivée avec heading optionnel
+            start_point (dict): Point de départ {latitude, longitude, altitude}
+            end_point (dict): Point d'arrivée {latitude, longitude, altitude}
             params (dict): Paramètres UAV
-            
         Returns:
-            dict: Solution candidate complète
+            dict: Points de trajectoire {latitude: [], longitude: [], altitude: []}
         """
+        num_points = params.get('num_points', 100)
         
-        # 1. Premier virage (départ)
-        turn1 = self._generate_turn(start_point, params['start_heading'], params['num_points']//3)
+        LBz = params['altitude_lower_bound']
+        UBz = params['altitude_upper_bound']
+        max_turn_rate = params['UAV_data']['max_turn_rate']
+        min_velocity = params['UAV_data']['min_airspeed']
+        max_velocity = params['UAV_data']['max_airspeed']
+        time_step = params['time_step']
+        horizon_length = params['horizon_length']
         
-        # 2. Segment droit
-        straight = self._generate_straight_segment(
-            turn1['end_point'],
-            {'latitude': end_point['latitude'], 'longitude': end_point['longitude'], 
-             'altitude': end_point['altitude']},
-            params['num_points']//3
+        num_steps = int(horizon_length / time_step)
+        
+        # Calcul du rayon de virage minimum
+        avg_velocity = (min_velocity + max_velocity) / 2
+        min_turn_radius = avg_velocity / max_turn_rate
+        
+        x_start, y_start, z_start = geographic_to_cartesian(
+            start_point['latitude'], start_point['longitude'], start_point['altitude']
+        )
+        x_end, y_end, z_end = geographic_to_cartesian(
+            end_point['latitude'], end_point['longitude'], end_point['altitude']
         )
         
-        # 3. Dernier virage (arrivée)
-        turn2 = self._generate_turn(straight['end_point'], params['end_heading'], params['num_points']//3)
         
-        # Combinaison des segments
-        return {
-            'latitude': turn1['path']['latitude'] + straight['path']['latitude'] + turn2['path']['latitude'],
-            'longitude': turn1['path']['longitude'] + straight['path']['longitude'] + turn2['path']['longitude'],
-            'altitude': turn1['path']['altitude'] + straight['path']['altitude'] + turn2['path']['altitude']
-        }
+        
+        latitudes = []
+        longitudes = []
+        altitudes = []
+        
+        return {'latitude': latitudes, 'longitude': longitudes, 'altitude': altitudes.tolist()}
         
     def _generate_turn(self, start_point, heading, num_points):
-        # Génération d'un virage avec le rayon minimum
-        pass  # À implémenter avec la géométrie différentielle
-        #TODO finish this method
+        # Utilise CircularTrajectory pour générer un virage
+        params = {
+            'num_points': num_points,
+            'radius': self.min_turn_radius
+        }
+        # Le point d'arrivée du virage est calculé à une distance d'un demi-cercle
+        arc_length = pi * self.min_turn_radius  # demi-cercle
+        end_point_lat, end_point_lon = get_destination_from_range_and_bearing(
+            start_point, arc_length, heading
+        )
+        end_point = {
+            'latitude': end_point_lat,
+            'longitude': end_point_lon,
+            'altitude': start_point['altitude']
+        }
+        circular_traj = CircularTrajectory(params, self.UAV_data)
+        path = circular_traj.generate_path(start_point, end_point, params)
+        return {'path': path, 'end_point': end_point}
+
     def _generate_straight_segment(self, start_point, end_point, num_points):
-        # Génération d'un segment droit
-        path = StraightLineTrajectory.generate_segment(start_point, end_point, num_points)
-        return {'path': path}
+        # Utilise StraightLineTrajectory pour générer un segment droit
+        params = {
+            'num_points': num_points
+        }
+        straight_traj = StraightLineTrajectory(params, self.UAV_data)
+        path = straight_traj.generate_path(start_point, end_point, None, None, None, params)
+        return {'path': path, 'end_point': end_point}
 
 class PythagoreanHodographPath(TrajectoryGenerator):
     """Spatial Pythagorean hodograph trajectory generator"""
@@ -320,3 +375,35 @@ class PythagoreanHodographPath(TrajectoryGenerator):
     def _evaluate_ph_curve(self, control_points, t):
         # Évaluation de la courbe PH
         pass  # À implémenter
+
+def generate_all_trajectories(start_point, end_point, FLT_data, Uidx, params, UAV_data):
+    """
+    Génère toutes les trajectoires possibles (droit, courbe, Dubins 3D, PH) entre deux points.
+    Retourne un dictionnaire avec chaque type de trajectoire.
+    """
+    # Générateur ligne droite
+    straight_traj = StraightLineTrajectory(params, UAV_data)
+    straight = straight_traj.generate_path(start_point, end_point, FLT_data, Uidx, None, params)
+
+    # Générateur courbe circulaire
+    circular_traj = CircularTrajectory(params, UAV_data)
+    circular = circular_traj.generate_path(start_point, end_point, params)
+
+    # Générateur Dubins 3D
+    dubins_traj = DubinsPath3D(params, UAV_data)
+    # Pour Dubins, il faut fournir les headings (cap) de départ/arrivée dans params
+    dubins_params = params.copy()
+    dubins_params.setdefault('start_heading', FLT_data[Uidx]['bearing'] if FLT_data and Uidx is not None else 0)
+    dubins_params.setdefault('end_heading', 0)
+    dubins = dubins_traj.generate_path(start_point, end_point, dubins_params)
+
+    # Générateur Pythagorean Hodograph
+    ph_traj = PythagoreanHodographPath(params, UAV_data)
+    ph = ph_traj.generate_path(start_point, end_point, params)
+
+    return {
+        'straight': straight,
+        'circular': circular,
+        'dubins': dubins,
+        'pythagorean_hodograph': ph
+    }

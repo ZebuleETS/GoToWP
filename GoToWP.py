@@ -207,22 +207,33 @@ def lineXline(pA, pB):
 
 def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_data, current_wp_idx):
     """
-    Generates and selects the best trajectory for a given UAV considering physical, energy, and safety constraints,
-    then updates its position and flight conditions. Uses TrajectoryEvaluator to select the optimal path.
-
+    Guides a UAV towards its next waypoint while considering flight dynamics, energy constraints, and collision avoidance.
+    This function computes candidate trajectories for a UAV based on its current flight mode (glide or engine), 
+    evaluates each candidate for safety (collision avoidance with other UAVs), energy consumption, and distance to the goal, 
+    and selects the optimal trajectory. The UAV's state and flight conditions are updated accordingly.
     Args:
-        FLT_track (dict): History of UAV positions and states.
-        FLT_conditions (dict): Current flight conditions of UAVs.
-        GOAL_WPs (dict): Target waypoints (latitude, longitude).
-        nUAVs (int): Total number of UAVs.
-        Uidx (int): Index of the UAV to process.
-        params (dict): Simulation parameters.
-        UAV_data (dict): Physical parameters of the UAV.
-        current_wp_idx (int): Index of the current waypoint to follow in GOAL_WPs.
-
+        FLT_track (list of dict): Flight track history for all UAVs, containing lists of latitude, longitude, altitude, etc.
+        FLT_conditions (list of dict): Current flight conditions for all UAVs (airspeed, flight mode, etc.).
+        GOAL_WPs (dict): Dictionary of goal waypoints with keys 'latitude', 'longitude', and optionally 'altitude'.
+        nUAVs (int): Total number of UAVs in the simulation.
+        Uidx (int): Index of the UAV to update.
+        params (dict): Simulation and UAV parameters (altitude bounds, time step, safe distance, etc.).
+        UAV_data (dict): UAV-specific data (performance, limits, etc.).
+        current_wp_idx (int): Index of the current target waypoint for the UAV.
     Returns:
-        tuple: (FLT_track, FLT_conditions, current_wp_idx) updated for the processed UAV.
+        tuple: Updated (FLT_track, FLT_conditions, current_wp_idx)
+            - FLT_track (list of dict): Updated flight track for all UAVs.
+            - FLT_conditions (list of dict): Updated flight conditions for all UAVs.
+            - current_wp_idx (int): Updated index of the current waypoint for the UAV.
+    Notes:
+        - The function assumes several helper functions are available, such as compute_distance, get_sink_rate, 
+          get_power_consumption, get_destination_from_range_and_bearing, geographic_to_cartesian, cartesian_to_geographic, 
+          lineXline, and find_min_index.
+        - The function handles both 'glide' and 'engine' flight modes.
+        - Collision avoidance is performed by predicting the future positions of other UAVs and checking for conflicts.
+        - The function normalizes and combines multiple cost criteria to select the best candidate trajectory.
     """
+    
     # Definition
     VO_flag = list()
     PO_flag = list()
@@ -270,7 +281,8 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
     
     # Check if we've reached the current waypoint
     distance_to_wp = compute_distance(current_pos, target_wp)[0]
-    if distance_to_wp < params.get('waypoint_threshold', 10.0):
+    next_step_distance = FLT_conditions[Uidx]['airspeed'] * params['time_step']
+    if distance_to_wp < params.get('waypoint_threshold', 10.0) or next_step_distance >= distance_to_wp:
         current_wp_idx += 1
         if current_wp_idx >= len(GOAL_WPs['latitude']):
             current_wp_idx = len(GOAL_WPs['latitude']) - 1  # Stay at the last waypoint
@@ -458,8 +470,6 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
         pos['longitude'] = candidate_sol['longitude'][i]
         pos['altitude'] = candidate_sol['altitude'][i]
         dest = dict()
-        #dest['latitude'] = GOAL_WPs['latitude'][-1]
-        #dest['longitude'] = GOAL_WPs['longitude'][-1]
         dest['latitude'] = GOAL_WPs['latitude'][current_wp_idx]  
         dest['longitude'] = GOAL_WPs['longitude'][current_wp_idx]  
         dest['altitude'] = candidate_sol['altitude'][i]

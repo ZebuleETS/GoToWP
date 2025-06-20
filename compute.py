@@ -184,8 +184,7 @@ def get_current_flight_data(FLT_track, FLT_conditions, nUAVs):
         FLT_data[u]['flight_mode'] = FLT_track[u]['flight_mode'][-1]
         FLT_data[u]['airspeed'] = FLT_conditions[u]['airspeed']
         FLT_data[u]['flight_path_angle'] = FLT_conditions[u]['flight_path_angle']
-        # TO BE ADDED: FLT_data[u]['bank_angle']
-        #FLT_data[u]['bank_angle'] = FLT_conditions[u]['bank_angle']
+        FLT_data[u]['bank_angle'] = FLT_conditions[u]['bank_angle']
 
     return FLT_data
 
