@@ -264,42 +264,48 @@ class DubinsPath3D(TrajectoryGenerator):
     
     def __init__(self):
         super().__init__(params=None, UAV_data=None)
-        self.params = {'num_points': 100}
         self.min_turn_radius = 30  # rayon de virage minimum en mètres
 
-    def generate_path(self, start_point, end_point, params):
+    def generate_path(self, start_point, end_point, FLT_data, params):
         """
-        Génère une trajectoire Dubins 3D optimisée
-        
+        Génère une trajectoire Dubins 3D entre deux points avec deux virages et un segment droit.
         Args:
-            start_point (dict): Point de départ avec format FLT_data (inclut bearing)
-            end_point (dict): Point d'arrivée avec heading optionnel
+            start_point (dict): Point de départ {latitude, longitude, altitude}
+            end_point (dict): Point d'arrivée {latitude, longitude, altitude}
             params (dict): Paramètres UAV
-            
         Returns:
-            dict: Solution candidate complète
+            dict: Points de trajectoire {latitude: [], longitude: [], altitude: []}
         """
+        num_points = params.get('num_points', 100)
         
-        # 1. Premier virage (départ)
-        turn1 = self._generate_turn(start_point, params['start_heading'], params['num_points']//3)
+        LBz = params['altitude_lower_bound']
+        UBz = params['altitude_upper_bound']
+        max_turn_rate = params['UAV_data']['max_turn_rate']
+        min_velocity = params['UAV_data']['min_airspeed']
+        max_velocity = params['UAV_data']['max_airspeed']
+        time_step = params['time_step']
+        horizon_length = params['horizon_length']
         
-        # 2. Segment droit
-        straight = self._generate_straight_segment(
-            turn1['end_point'],
-            {'latitude': end_point['latitude'], 'longitude': end_point['longitude'], 
-             'altitude': end_point['altitude']},
-            params['num_points']//3
+        num_steps = int(horizon_length / time_step)
+        
+        # Calcul du rayon de virage minimum
+        avg_velocity = (min_velocity + max_velocity) / 2
+        min_turn_radius = avg_velocity / max_turn_rate
+        
+        x_start, y_start, z_start = geographic_to_cartesian(
+            start_point['latitude'], start_point['longitude'], start_point['altitude']
+        )
+        x_end, y_end, z_end = geographic_to_cartesian(
+            end_point['latitude'], end_point['longitude'], end_point['altitude']
         )
         
-        # 3. Dernier virage (arrivée)
-        turn2 = self._generate_turn(straight['end_point'], params['end_heading'], params['num_points']//3)
         
-        # Combinaison des segments
-        return {
-            'latitude': turn1['path']['latitude'] + straight['path']['latitude'] + turn2['path']['latitude'],
-            'longitude': turn1['path']['longitude'] + straight['path']['longitude'] + turn2['path']['longitude'],
-            'altitude': turn1['path']['altitude'] + straight['path']['altitude'] + turn2['path']['altitude']
-        }
+        
+        latitudes = []
+        longitudes = []
+        altitudes = []
+        
+        return {'latitude': latitudes, 'longitude': longitudes, 'altitude': altitudes.tolist()}
         
     def _generate_turn(self, start_point, heading, num_points):
         # Utilise CircularTrajectory pour générer un virage

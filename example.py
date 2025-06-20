@@ -93,6 +93,8 @@ GOAL_WPs = dict()
 GOAL_WPs['latitude'] = np.random.uniform(params['latitude_lower_bound'], params['latitude_upper_bound'], 10).tolist()
 GOAL_WPs['longitude'] = np.random.uniform(params['longitude_lower_bound'], params['longitude_upper_bound'], 10).tolist()
 
+# use trajectory from generator
+
 Uidx = 0 # ID of UAV
 
 FLT_track, FLT_conditions = gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_data)

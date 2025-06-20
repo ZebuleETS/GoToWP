@@ -469,8 +469,6 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
         pos['longitude'] = candidate_sol['longitude'][i]
         pos['altitude'] = candidate_sol['altitude'][i]
         dest = dict()
-        #dest['latitude'] = GOAL_WPs['latitude'][-1]
-        #dest['longitude'] = GOAL_WPs['longitude'][-1]
         dest['latitude'] = GOAL_WPs['latitude'][current_wp_idx]  
         dest['longitude'] = GOAL_WPs['longitude'][current_wp_idx]  
         dest['altitude'] = candidate_sol['altitude'][i]
