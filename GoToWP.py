@@ -281,7 +281,8 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
     
     # Check if we've reached the current waypoint
     distance_to_wp = compute_distance(current_pos, target_wp)[0]
-    if distance_to_wp < params.get('waypoint_threshold', 10.0):
+    next_step_distance = FLT_conditions[Uidx]['airspeed'] * params['time_step']
+    if distance_to_wp < params.get('waypoint_threshold', 10.0) or next_step_distance >= distance_to_wp:
         current_wp_idx += 1
         if current_wp_idx >= len(GOAL_WPs['latitude']):
             current_wp_idx = len(GOAL_WPs['latitude']) - 1  # Stay at the last waypoint
