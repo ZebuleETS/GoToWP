@@ -97,4 +97,4 @@ GOAL_WPs['longitude'] = np.random.uniform(params['longitude_lower_bound'], param
 
 Uidx = 0 # ID of UAV
 
-FLT_track, FLT_conditions = gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_data)
+FLT_track, FLT_conditions, current_wp_idx = gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_data)
