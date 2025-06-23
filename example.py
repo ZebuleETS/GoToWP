@@ -1,7 +1,7 @@
 # ---------- EXAMPLE ----------
 
 import numpy as np
-from GoToWP import gotoWaypoint
+from GoToWP import gotoWaypointMulti
 from compute import get_destination_from_range_and_bearing
 from trajectory import TrajectoryEvaluator, generate_all_trajectories
 
@@ -99,14 +99,14 @@ END_WPs['longitude'] = np.random.uniform(params['longitude_lower_bound'], params
 evaluator = TrajectoryEvaluator(params, UAV_data)
 for u in range(nUAVs):
     trajectoires = generate_all_trajectories(FLT_track[u]['latitude'][-1], FLT_track[u]['longitude'][-1], END_WPs['latitude'][u], END_WPs['longitude'][u], params, UAV_data)
-    optimal_trajectoires = evaluator.evaluate_trajectories(trajectoires)
+    optimal_trajectoires = evaluator.evaluate_trajectories(trajectoires, FLT_conditions[u])
     GOAL_WPs[u] = dict()
     GOAL_WPs[u]['latitude'] = optimal_trajectoires['latitude']
     GOAL_WPs[u]['longitude'] = optimal_trajectoires['longitude']
     GOAL_WPs[u]['altitude'] = optimal_trajectoires['altitude']
     
     
-    
-Uidx = 0 # ID of UAV
 
-FLT_track, FLT_conditions, current_wp_idx = gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_data)
+current_wp_idx = 0 # Index of the current waypoint
+
+FLT_track, FLT_conditions, current_wp_idx = gotoWaypointMulti(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, params, UAV_data, current_wp_idx)

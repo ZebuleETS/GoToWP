@@ -6,7 +6,9 @@ from compute import (
     compute_bearing,
     compute_distance,
     geographic_to_cartesian,
-    get_destination_from_range_and_bearing
+    get_destination_from_range_and_bearing,
+    get_power_consumption,
+    get_sink_rate
 )
 from typing import Dict
 
@@ -281,9 +283,19 @@ def generate_all_trajectories(start_point, end_point, UAV_data, params):
 class TrajectoryEvaluator:
     """Classe pour évaluer les trajectoires générées"""
     
-    def __init__(self, params: Dict, UAV_data: Dict):
+    def __init__(self, params: Dict, UAV_data: Dict, ):
         self.params = params
         self.UAV_data = UAV_data
+        self.weights = {
+            'distance': 1,
+            'energy': 10.0,
+            'turn_rate': 5.0,    
+            'smoothness': 3.0,           
+            'battery_feasibility': 500.0 
+        }
+        self.alt_min = params['altitude_lower_bound']
+        self.alt_max = params['altitude_upper_bound']
+    
 
     def evaluate_trajectory(self, trajectories: Dict) -> Dict:
         """
@@ -305,7 +317,7 @@ class TrajectoryEvaluator:
                 best_trajectory = trajectory
         return {'trajectory': best_trajectory}
     
-    def _evaluate_single_trajectory(self, trajectory: Dict) -> float:
+    def _evaluate_single_trajectory(self, trajectory: Dict, FLT_conditions) -> float:
         """
         Évalue une trajectoire unique en fonction de critères définis.
         Args:
@@ -313,26 +325,114 @@ class TrajectoryEvaluator:
         Returns:
             float: Score de la trajectoire
         """
-        # Critère 1 : Altitude dans les bornes (vectorisé)
+        lats = np.array(trajectory['latitude'])
+        lons = np.array(trajectory['longitude'])
         alts = np.array(trajectory['altitude'])
-        altitude_ok = np.all((alts >= self.alt_min) & (alts <= self.alt_max))
+        total_score = 0.0
         
-        # Critère 2 : Distance totale (optimisée)
+        # Critère 1 : Altitude dans les bornes (vectorisé)
+        altitude_ok = np.all((alts >= self.alt_min) & (alts <= self.alt_max))
+        if not altitude_ok:
+            total_score += 1000
+        
+        # Critère 2 : Distance totale
+        total_distance = self._compute_total_distance(lats, lons, alts)
+        distance_cost = total_distance * self.weights['distance']
+        total_score += distance_cost
         
         # Critère 3 : Consommation énergétique
+        total_energy, is_feasible = self._compute_energy_consumption(trajectory, FLT_conditions)
+        energy_cost = total_energy * self.weights['energy']
+        total_score += energy_cost
         
-        # Critère 4 : Rayon de virage minimum
+        # Pénalité si la trajectoire n'est pas faisable énergétiquement
+        if not is_feasible:
+            total_score += self.weights['battery_feasibility']
         
-        # Critère 5 : Vitesse moyenne réaliste
+        # Critère 4 : Rayon de virage respecté
+        # Calculer les angles entre segments consécutifs
+        turn_rates = self._compute_turn_rates(lats, lons)
+        # Pénalise les virages trop serrés
+        if len(turn_rates) > 0:
+            max_allowed_turn = self.UAV_data['max_turn_rate']
+            penalty = sum(max(0, rate - max_allowed_turn) for rate in turn_rates)
+            total_score += penalty * self.weights['turn_rate']
         
-        # Exemple d'évaluation basée sur la distance totale parcourue
-        total_distance = 0.0
-        for i in range(1, len(trajectory['latitude'])):
-            dist = compute_distance(
-                {'latitude': trajectory['latitude'][i-1], 'longitude': trajectory['longitude'][i-1]},
-                {'latitude': trajectory['latitude'][i], 'longitude': trajectory['longitude'][i]}
-            )[0]
-            total_distance += dist
+        return total_score
+    
+    def _compute_energy_consumption(self, trajectory: Dict, FLT_conditions) -> tuple:
+        """
+        Calcule la consommation d'énergie totale pour suivre la trajectoire donnée.
         
-        # Ajouter d'autres critères d'évaluation si nécessaire
-        return total_distance
+        Args:
+            trajectory (dict): Trajectoire à évaluer {latitude: [], longitude: [], altitude: []}
+            
+        Returns:
+            tuple: (consommation_totale, est_faisable)
+        """
+        lats = trajectory['latitude']
+        lons = trajectory['longitude']
+        alts = trajectory['altitude']
+        
+        # Point de départ initial avec batterie complète
+        initial_battery = self.UAV_data['maximum_battery_capacity']
+        current_battery = initial_battery
+        total_consumption = 0
+        time_step = self.params['time_step']
+        
+        for i in range(len(lats) - 1):
+            
+            # Déterminer le mode de vol (montée = moteur, descente = planeur)
+            altitude_change = alts[i+1] - alts[i]
+            
+            # Calculer la consommation d'énergie si le drone monte
+            if altitude_change >= 0:  # Mode moteur pour monter ou vol horizontal
+                # Calculer la puissance requise
+                power = get_power_consumption(self.UAV_data, FLT_conditions)
+                # Convertir la puissance (W) en énergie (Wh) pour ce segment
+                energy_segment = power * (time_step / 3600)
+            
+            # Mettre à jour la consommation totale et la batterie restante
+            total_consumption += energy_segment
+            current_battery -= energy_segment
+        
+        # Vérifier si la trajectoire est faisable avec la batterie disponible
+        is_feasible = current_battery >= self.UAV_data.get('desired_reserved_battery_capacity', 0)
+        
+        return total_consumption, is_feasible
+    
+    def _compute_turn_rates(self, lats, lons):
+        """
+        Calcule les taux de virage entre segments consécutifs
+        """
+        turn_rates = []
+        if len(lats) < 3:
+            return turn_rates
+            
+        for i in range(len(lats)-2):
+            point1 = {'latitude': lats[i], 'longitude': lons[i]}
+            point2 = {'latitude': lats[i+1], 'longitude': lons[i+1]}
+            point3 = {'latitude': lats[i+2], 'longitude': lons[i+2]}
+            
+            # Calculer les bearings
+            bearing1 = compute_bearing(point1, point2)[0]
+            bearing2 = compute_bearing(point2, point3)[0]
+            
+            # Différence d'angle (taux de virage)
+            diff = abs((bearing2 - bearing1 + np.pi) % (2 * np.pi) - np.pi)
+            turn_rates.append(diff)
+            
+        return turn_rates
+    
+    def _compute_total_distance(self, lats, lons, alts):
+        """
+        Calcule la distance totale parcourue par la trajectoire en utilisant des calculs vectorisés.
+        """
+        # use compute function to compute distances
+        distances = []
+        for i in range(len(lats) - 1):
+            start_point = {'latitude': lats[i], 'longitude': lons[i], 'altitude': alts[i]}
+            end_point = {'latitude': lats[i + 1], 'longitude': lons[i + 1], 'altitude': alts[i + 1]}
+            distance = compute_distance(start_point, end_point)[0]
+            distances.append(distance)
+        return np.sum(distances)
