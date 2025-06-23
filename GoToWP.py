@@ -3,6 +3,7 @@ import numpy as np
 import warnings
 from compute import (
     cartesian_to_geographic,
+    compute_distance,
     geographic_to_cartesian,
     get_current_flight_data,
     get_power_consumption,
@@ -38,126 +39,6 @@ def update_remaining_energy(flight_conditions, power_consumption, time_step):
         remaining_energy.append(flight_conditions['battery_capacity'] - energy_cost)
 
     return remaining_energy
-
-
-def compute_distance(pos, dest):
-    """
-    Calculates the 3D (horizontal and vertical) distance between two geographic points.
-
-    Args:
-        pos (dict): Start position (latitude, longitude, altitude).
-        dest (dict): Destination position (latitude, longitude, altitude).
-
-    Returns:
-        list: List of distances (meters) for each destination.
-    """
-    if isinstance(pos['altitude'], list):
-        pos_alt = pos['altitude'][-1]
-    else:
-        pos_alt = pos['altitude']
-
-    dest_alt = dest['altitude']
-    vert_dist = []
-
-    if isinstance(dest_alt, float):
-        dest_alt = [dest_alt]
-
-    n = len(dest_alt)
-
-    for i in range(n):
-        if isinstance(dest_alt[i], list):
-            dest_alt[i] = dest_alt[i][0]
-
-        vert_dist.append(dest_alt[i] - pos_alt)
-
-    horizontal_dis = compute_great_circle_dist(pos, dest)
-
-    vert_dist_temp = [x ** 2 for x in vert_dist]
-    horizontal_dis_temp = [x ** 2 for x in horizontal_dis]
-    distance_temp = [sum(x) for x in zip(vert_dist_temp, horizontal_dis_temp)]
-    distance = [sqrt(x) for x in distance_temp]
-    return distance
-
-def compute_great_circle_dist(pos, dest):
-    """
-    Calculates the great-circle distance between two points on the Earth's surface.
-
-    Args:
-        pos (dict): Start position (latitude, longitude).
-        dest (dict): Destination position (latitude, longitude).
-
-    Returns:
-        list: List of distances (meters) for each destination.
-    """
-    if isinstance(pos['latitude'], list):
-        pos_lat = pos['latitude'][-1]
-        pos_lon = pos['longitude'][-1]
-    else:
-        pos_lat = pos['latitude']
-        pos_lon = pos['longitude']
-
-    dest_lat = dest['latitude']
-    dest_lon = dest['longitude']
-
-    if isinstance(dest_lat, float):
-        dest_lat = [dest_lat]
-        dest_lon = [dest_lon]
-
-    n = len(dest_lat)
-
-    EARTH_RADIUS = 6378137
-
-    distance = []
-    for i in range(n):
-        if isinstance(dest_lat[i], list):
-            dest_lat[i] = dest_lat[i][0]
-            dest_lon[i] = dest_lon[i][0]
-
-        dlon = dest_lon[i] - pos_lon
-        dlat = dest_lat[i] - pos_lat
-
-        a = sin(dlat / 2) ** 2 + cos(pos_lat) * cos(dest_lat[i]) * sin(dlon / 2) ** 2
-        c = 2 * atan2(sqrt(a), sqrt(1 - a))
-
-        distance.append(EARTH_RADIUS * c)
-
-    return distance
-
-#not used
-def compute_bearing(pos, dest):
-    """
-    Calculates the initial bearing (azimuth) between two geographic points.
-
-    Args:
-        pos (dict): Start position (latitude, longitude).
-        dest (dict): Destination position (latitude, longitude).
-
-    Returns:
-        list: List of bearings (radians) for each destination.
-    """
-    pos_lat = pos['latitude']
-    pos_lon = pos['longitude']
-    dest_lat = dest['latitude']
-    dest_lon = dest['longitude']
-
-    if isinstance(dest_lat, float):
-        dest_lat = [dest_lat]
-        dest_lon = [dest_lon]
-
-    n = len(dest_lat)
-    init_course = []
-    for i in range(n):
-        if isinstance(dest_lat[i], list):
-            dest_lat[i] = dest_lat[i][0]
-            dest_lon[i] = dest_lon[i][0]
-
-        y = sin(dest_lon[i] - pos_lon) * cos(dest_lat[i])
-        x = cos(pos_lat) * sin(dest_lat[i]) - sin(pos_lat) * cos(dest_lat[i]) * cos(dest_lon[i] - pos_lon)
-
-        course = atan2(y, x)
-        init_course.append(course + (2 * pi) % (2 * pi))
-    return init_course
-
 
 def find_min_index(list):
     """
