@@ -1,16 +1,14 @@
 import numpy as np
-from math import pi, sqrt
-from scipy.interpolate import CubicSpline
+from math import pi
 from abc import ABC, abstractmethod
-from GoToWP import compute_bearing, compute_distance
 from compute import (
     cartesian_to_geographic,
+    compute_bearing,
+    compute_distance,
     geographic_to_cartesian,
-    get_power_consumption,
-    get_sink_rate,
     get_destination_from_range_and_bearing
 )
-from typing import Dict, Tuple
+from typing import Dict
 
 class TrajectoryGenerator(ABC):
     """Abstract base class for trajectory generators"""
@@ -19,172 +17,30 @@ class TrajectoryGenerator(ABC):
         self.UAV_data = UAV_data
 
     @abstractmethod
-    def generate_path(self, start_point, end_point, FLT_data, Uidx, candidate_positions, params):
+    def generate_path(self, start_point, end_point):
         """
         Generates a trajectory between two points
         
         Args:
             start_point (dict): Starting point {latitude, longitude, altitude}
             end_point (dict): End point {latitude, longitude, altitude}
-            FLT_data (dict): Flight data for the UAV
-            Uidx (int): Index of the UAV
-            candidate_positions (dict): Candidate positions for the trajectory
-            params (dict): Additional method-specific parameters
             
         Returns:
             dict: Trajectory points {latitude: [], longitude: [], altitude: []}
         """
         pass
 
-class TrajectoryCalculator:
-    def __init__(self, params: Dict, UAV_data: Dict):
-        self.params = params
-        self.UAV_data = UAV_data
-        
-    def generate_trajectory_options(self, FLT_data: Dict, Uidx: int) -> Tuple[np.ndarray, np.ndarray]:
-        """Génère les options de trajectoire vectorisées"""
-        # Création des grilles de cap et vitesse
-        h_step = self.params['bearing_step']
-        v_step = self.params['speed_step']
-        max_turn_rate = self.UAV_data['max_turn_rate']
-        min_velocity = self.UAV_data['min_airspeed']
-        max_velocity = self.UAV_data['max_airspeed']
-        
-        Hr = np.linspace(FLT_data[Uidx]['bearing'], 
-                        FLT_data[Uidx]['bearing'] + max_turn_rate, h_step)
-        Hl = np.linspace(FLT_data[Uidx]['bearing'] - max_turn_rate,
-                        FLT_data[Uidx]['bearing'], h_step)
-        H = np.hstack([Hl, Hr[1:]])
-        
-        Vr = np.linspace(FLT_data[Uidx]['airspeed'], max_velocity, v_step)
-        Vl = np.linspace(min_velocity, FLT_data[Uidx]['airspeed'], v_step)
-        V = np.hstack([Vl, Vr[1:]])
-        
-        return np.meshgrid(H, V)
-
-    def calculate_trajectories(self, FLT_data: Dict, Uidx: int, mode: str) -> Dict:
-        """Calcule les trajectoires possibles selon le mode de vol"""
-        # Génération des grilles de cap et vitesse
-        H_grid, V_grid = self.generate_trajectory_options(FLT_data, Uidx)
-        n_combinations = H_grid.size
-        
-        # Configuration des paramètres
-        t_step = self.params['time_step']
-        LBz = self.params['altitude_lower_bound']
-        UBz = self.params['altitude_upper_bound']
-        
-        # Initialisation des résultats potentiels
-        candidate_positions = {
-            'latitude': np.zeros(n_combinations),
-            'longitude': np.zeros(n_combinations),
-            'altitude': np.zeros(n_combinations),
-            'bearing': H_grid.flatten(),
-            'airspeed': V_grid.flatten(),
-            'battery_capacity': np.zeros(n_combinations),
-            'flight_path_angle': np.zeros(n_combinations),
-            'flight_mode': np.array([mode] * n_combinations)
-        }
-        
-        if mode == 'glide':
-            return self._calculate_glide_trajectories(
-                FLT_data, Uidx, candidate_positions, t_step, LBz, UBz
-            )
-        else: # mode == 'engine'
-            return self._calculate_engine_trajectories(
-                FLT_data, Uidx, candidate_positions, t_step, LBz, UBz
-            )
-    
-    def _calculate_glide_trajectories(self, FLT_data, Uidx, candidate_positions, 
-                                    t_step, LBz, UBz):
-        """Calcul vectorisé des trajectoires en mode planeur"""
-        airspeeds = candidate_positions['airspeed']
-        
-        # Calcul vectorisé du taux de descente
-        FLT_conditions_vec = {
-            'airspeed': airspeeds,
-            'airspeed_dot': np.zeros_like(airspeeds)
-        }
-        sink_rates = np.vectorize(get_sink_rate)(self.UAV_data, FLT_conditions_vec)
-        
-        # Calcul des déplacements
-        dZ = -sink_rates * t_step
-        TD = airspeeds * t_step
-        
-        # Calcul des nouvelles positions
-        current_pos = {
-            'latitude': FLT_data[Uidx]['latitude'],
-            'longitude': FLT_data[Uidx]['longitude']
-        }
-        
-        # Calcul vectorisé des destinations
-        lats, lons = np.vectorize(get_destination_from_range_and_bearing)(
-            [current_pos] * len(TD), 
-            TD,
-            candidate_positions['bearing']
-        )
-        
-        # Mise à jour des positions
-        candidate_positions['latitude'] = lats
-        candidate_positions['longitude'] = lons
-        candidate_positions['altitude'] = np.clip(
-            FLT_data[Uidx]['altitude'] + dZ,
-            LBz,
-            UBz
-        )
-        candidate_positions['battery_capacity'].fill(FLT_data[Uidx]['battery_capacity'])
-        
-        return candidate_positions
-    
-    def _calculate_engine_trajectories(self, FLT_data, Uidx, candidate_positions, 
-                                     t_step, LBz, UBz):
-        """Calcul vectorisé des trajectoires en mode moteur"""
-        airspeeds = candidate_positions['airspeed']
-        
-        # Calcul des déplacements
-        dZ = airspeeds * t_step
-        
-        # Calcul de la consommation d'énergie
-        FLT_conditions_vec = {
-            'airspeed': airspeeds,
-            'airspeed_dot': np.zeros_like(airspeeds)
-        }
-        power = np.vectorize(get_power_consumption)(self.UAV_data, FLT_conditions_vec)
-        power_consumption = power * (t_step / 3600)
-        
-        # Calcul des nouvelles positions
-        current_pos = {
-            'latitude': FLT_data[Uidx]['latitude'],
-            'longitude': FLT_data[Uidx]['longitude']
-        }
-        
-        # Calcul vectorisé des destinations
-        lats, lons = np.vectorize(get_destination_from_range_and_bearing)(
-            [current_pos] * len(dZ), 
-            dZ,
-            candidate_positions['bearing']
-        )
-        
-        # Mise à jour des positions
-        candidate_positions['latitude'] = lats
-        candidate_positions['longitude'] = lons
-        candidate_positions['altitude'] = np.clip(
-            FLT_data[Uidx]['altitude'] + dZ,
-            LBz,
-            UBz
-        )
-        candidate_positions['battery_capacity'] = (
-            FLT_data[Uidx]['battery_capacity'] - power_consumption
-        )
-        
-        return candidate_positions
-    
-
 class StraightLineTrajectory(TrajectoryGenerator):
-    """Straight line trajectory generator"""
+    """
+    Straight line trajectory generator
+    Args:
+        params (dict): Parameters for the trajectory generation, e.g., number of points, radius, etc.
+        UAV_data (dict): UAV data containing specifications like speed, altitude limits, etc.
+    """
     def __init__(self, params=None, UAV_data=None):
         super().__init__(params, UAV_data)
 
-    def generate_path(self, start_point, end_point, FLT_data, Uidx, candidate_positions, params):
+    def generate_path(self, start_point, end_point):
         """
         Génère une trajectoire en ligne droite géodésique entre deux points
         
@@ -196,7 +52,7 @@ class StraightLineTrajectory(TrajectoryGenerator):
         Returns:
             dict: Points de trajectoire {latitude: [], longitude: [], altitude: []}
         """
-        num_points = params.get('num_points', 100)
+        num_points = self.params.get('num_points', 100)
         
         distance = compute_distance(start_point, end_point)[0]
         initial_bearing = compute_bearing(start_point, end_point)[0]
@@ -216,11 +72,16 @@ class StraightLineTrajectory(TrajectoryGenerator):
         return {'latitude': latitudes, 'longitude': longitudes, 'altitude': alt.tolist()}
 
 class CircularTrajectory(TrajectoryGenerator):
-    """Circular trajectory generator utilisant les fonctions utilitaires du projet"""
+    """
+    Circular trajectory generator utilisant les fonctions utilitaires du projet
+    Args:
+            params (dict): Parameters for the trajectory generation, e.g., number of points, radius, etc.
+            UAV_data (dict): UAV data containing specifications like speed, altitude limits, etc.
+    """
     def __init__(self, params=None, UAV_data=None):
         super().__init__(params, UAV_data)
 
-    def generate_path(self, start_point, end_point, FLT_data=None, Uidx=None, candidate_positions=None, params=None):
+    def generate_path(self, start_point, end_point):
         """
         Génère une trajectoire circulaire géodésiques entre deux points en utilisant les fonctions utilitaires.
         Args:
@@ -230,8 +91,8 @@ class CircularTrajectory(TrajectoryGenerator):
         Returns:
             dict: Points de trajectoire {latitude: [], longitude: [], altitude: []}
         """
-        num_points = params.get('num_points', 100)
-        radius = params.get('radius', 100)  # rayon en mètres
+        num_points = self.params.get('num_points', 100)
+        radius = self.params.get('radius', 100)  # rayon en mètres
 
         # Calcul du centre du cercle (milieu géodésique)
         distance = compute_distance(start_point, end_point)[0]
@@ -260,13 +121,18 @@ class CircularTrajectory(TrajectoryGenerator):
         return {'latitude': latitudes, 'longitude': longitudes, 'altitude': altitudes.tolist()}
 
 class DubinsPath3D(TrajectoryGenerator):
-    """3D Dubins path trajectory generator"""
+    """
+    3D Dubins path trajectory generator
+    Args:
+            params (dict): Parameters for the trajectory generation, e.g., number of points, radius, etc.
+            UAV_data (dict): UAV data containing specifications like speed, altitude limits, etc.
+    """
     
     def __init__(self):
         super().__init__(params=None, UAV_data=None)
         self.min_turn_radius = 30  # rayon de virage minimum en mètres
 
-    def generate_path(self, start_point, end_point, FLT_data, params):
+    def generate_path(self, start_point, end_point):
         """
         Génère une trajectoire Dubins 3D entre deux points avec deux virages et un segment droit.
         Args:
@@ -276,15 +142,15 @@ class DubinsPath3D(TrajectoryGenerator):
         Returns:
             dict: Points de trajectoire {latitude: [], longitude: [], altitude: []}
         """
-        num_points = params.get('num_points', 100)
+        num_points = self.params.get('num_points', 100)
         
-        LBz = params['altitude_lower_bound']
-        UBz = params['altitude_upper_bound']
-        max_turn_rate = params['UAV_data']['max_turn_rate']
-        min_velocity = params['UAV_data']['min_airspeed']
-        max_velocity = params['UAV_data']['max_airspeed']
-        time_step = params['time_step']
-        horizon_length = params['horizon_length']
+        LBz = self.params['altitude_lower_bound']
+        UBz = self.params['altitude_upper_bound']
+        max_turn_rate = self.UAV_data['max_turn_rate']
+        min_velocity = self.UAV_data['min_airspeed']
+        max_velocity = self.UAV_data['max_airspeed']
+        time_step = self.params['time_step']
+        horizon_length = self.params['horizon_length']
         
         num_steps = int(horizon_length / time_step)
         
@@ -337,9 +203,16 @@ class DubinsPath3D(TrajectoryGenerator):
         return {'path': path, 'end_point': end_point}
 
 class PythagoreanHodographPath(TrajectoryGenerator):
-    """Spatial Pythagorean hodograph trajectory generator"""
+    """
+    Pythagorean Hodograph path trajectory generator
+    Args:
+            params (dict): Parameters for the trajectory generation, e.g., number of points, radius, etc.
+            UAV_data (dict): UAV data containing specifications like speed, altitude limits, etc.
+    """
+    def __init__(self, params=None, UAV_data=None):
+        super().__init__(params, UAV_data)
     
-    def generate_path(self, start_point, end_point, params):
+    def generate_path(self, start_point, end_point, UAV_data, Uidx, params):
         num_points = params.get('num_points', 100)
         
         # Conversion en coordonnées cartésiennes pour simplifier les calculs
@@ -376,26 +249,23 @@ class PythagoreanHodographPath(TrajectoryGenerator):
         # Évaluation de la courbe PH
         pass  # À implémenter
 
-def generate_all_trajectories(start_point, end_point, FLT_data, Uidx, params, UAV_data):
+def generate_all_trajectories(start_point, end_point, UAV_data, params):
     """
     Génère toutes les trajectoires possibles (droit, courbe, Dubins 3D, PH) entre deux points.
     Retourne un dictionnaire avec chaque type de trajectoire.
     """
     # Générateur ligne droite
     straight_traj = StraightLineTrajectory(params, UAV_data)
-    straight = straight_traj.generate_path(start_point, end_point, FLT_data, Uidx, None, params)
+    straight = straight_traj.generate_path(start_point, end_point)
 
     # Générateur courbe circulaire
     circular_traj = CircularTrajectory(params, UAV_data)
-    circular = circular_traj.generate_path(start_point, end_point, params)
+    circular = circular_traj.generate_path(start_point, end_point)
 
     # Générateur Dubins 3D
     dubins_traj = DubinsPath3D(params, UAV_data)
-    # Pour Dubins, il faut fournir les headings (cap) de départ/arrivée dans params
-    dubins_params = params.copy()
-    dubins_params.setdefault('start_heading', FLT_data[Uidx]['bearing'] if FLT_data and Uidx is not None else 0)
-    dubins_params.setdefault('end_heading', 0)
-    dubins = dubins_traj.generate_path(start_point, end_point, dubins_params)
+    # Pour Dubins, il faut fournir les headings (cap) de départ/arrivée
+    dubins = dubins_traj.generate_path(start_point, end_point)
 
     # Générateur Pythagorean Hodograph
     ph_traj = PythagoreanHodographPath(params, UAV_data)
@@ -407,3 +277,95 @@ def generate_all_trajectories(start_point, end_point, FLT_data, Uidx, params, UA
         'dubins': dubins,
         'pythagorean_hodograph': ph
     }
+
+class TrajectoryEvaluator:
+    """
+    Classe pour évaluer les trajectoires générées.
+    Elle vérifie les critères de vol et de sécurité.
+    """
+    def __init__(self, UAV_data, params):
+        self.UAV_data = UAV_data
+        self.params = params
+    
+    def evaluate_trajectory(self, trajectory):
+        """
+        Évalue une trajectoire unique en vérifiant les critères de vol et de sécurité.
+        Args:
+            trajectory (dict): Trajectory data containing 'latitude', 'longitude', and 'altitude' arrays.
+        Returns:
+            dict: Evaluation results including 'altitude_ok', 'distance_m', 'energy_Wh', and 'score'.
+        """
+        lat = np.array(trajectory['latitude'])
+        lon = np.array(trajectory['longitude'])
+        alt = np.array(trajectory['altitude'])
+
+        # Critère 1 : Altitude dans les bornes
+        altitude_ok = np.all((alt >= self.params['altitude_lower_bound']) & (alt <= self.params['altitude_upper_bound']))
+
+        # Critère 2 : Distance totale
+        dist = 0
+        for i in range(1, len(lat)):
+            p1 = {'latitude': lat[i-1], 'longitude': lon[i-1], 'altitude': alt[i-1]}
+            p2 = {'latitude': lat[i], 'longitude': lon[i], 'altitude': alt[i]}
+            dist += compute_distance(p1, p2)[0]
+
+        # Critère 3 : Consommation énergétique estimée
+        avg_speed = (self.UAV_data['min_airspeed'] + self.UAV_data['max_airspeed']) / 2
+        time = dist / avg_speed if avg_speed > 0 else 0
+        power = self.UAV_data.get('max_power_consumption', 100)
+        energy = power * (time / 3600) # Wh
+        # Critère 4 : Batterie suffisante
+        battery_ok = energy < self.UAV_data.get('maximum_battery_capacity', 100)  
+        # Critère 5 : Rayon de virage minimal (pour courbes)
+
+        # Score global
+        score = 0
+        if altitude_ok:
+            score += 1
+        if battery_ok:
+            score += 1
+
+        return {
+            'altitude_ok': altitude_ok,
+            'distance_m': dist,
+            'energy_Wh': energy,
+            'score': score
+        }
+    def evaluate_all_trajectories(self, trajectories):
+        """
+        Évalue toutes les trajectoires fournies.
+        Args:
+            trajectories (dict): Dictionnaire de trajectoires, où chaque clé est un type de trajectoire et chaque valeur est un dictionnaire contenant des tableaux 'latitude', 'longitude' et 'altitude'.
+        Returns:
+
+            dict: Un dictionnaire où chaque clé est un type de trajectoire et chaque valeur est un dictionnaire avec les indicateurs d'évaluation.
+        """ 
+        results = {}
+        for traj_type, traj in trajectories.items():
+            results[traj_type] = self.evaluate_trajectory(traj)
+        return results
+    def find_best_trajectory_for_each_uav(nUAVs, UAV_data, params):
+        """
+        Finds the best trajectory for each UAV based on the evaluation results.
+        Parameters:
+            trajectories (dict): Dictionary of evaluated trajectories.
+            UAV_data (dict): Dictionary containing UAV parameters.
+            params (dict): Dictionary of evaluation parameters.
+        Returns:
+            dict: A dictionary where each key is a UAV index and each value is the best trajectory type.
+        """
+        best_trajectories = {}
+        
+        for uav_idx in range(len(UAV_data)):
+            best_score = -1
+            best_traj_type = None
+            for traj_type, results in trajectories.items():
+                if results['score'] > best_score:
+                    best_score = results['score']
+                    best_traj_type = traj_type
+            best_trajectories[uav_idx] = best_traj_type
+        return best_trajectories
+    
+
+
+

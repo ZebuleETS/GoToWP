@@ -3,6 +3,7 @@
 import numpy as np
 from GoToWP import gotoWaypoint
 from compute import get_destination_from_range_and_bearing
+from trajectory import TrajectoryEvaluator
 
 
 nUAVs = 2
@@ -90,10 +91,11 @@ for u in range(nUAVs):
     FLT_track[u]['flight_mode'].append('glide')
 
 GOAL_WPs = dict()
-GOAL_WPs['latitude'] = np.random.uniform(params['latitude_lower_bound'], params['latitude_upper_bound'], 10).tolist()
-GOAL_WPs['longitude'] = np.random.uniform(params['longitude_lower_bound'], params['longitude_upper_bound'], 10).tolist()
+#GOAL_WPs['latitude'] = np.random.uniform(params['latitude_lower_bound'], params['latitude_upper_bound'], 10).tolist()
+#GOAL_WPs['longitude'] = np.random.uniform(params['longitude_lower_bound'], params['longitude_upper_bound'], 10).tolist()
 
 # use trajectory from generator
+trajectory = TrajectoryEvaluator(UAV_data, params)
 
 Uidx = 0 # ID of UAV
 
