@@ -3,6 +3,7 @@
 import numpy as np
 from GoToWP import gotoWaypoint
 from compute import get_destination_from_range_and_bearing
+from trajectory import TrajectoryEvaluator, generate_all_trajectories
 
 
 nUAVs = 2
@@ -89,12 +90,23 @@ for u in range(nUAVs):
     FLT_track[u]['flight_time'].append(0.0)
     FLT_track[u]['flight_mode'].append('glide')
 
+END_WPs = dict()
 GOAL_WPs = dict()
-GOAL_WPs['latitude'] = np.random.uniform(params['latitude_lower_bound'], params['latitude_upper_bound'], 10).tolist()
-GOAL_WPs['longitude'] = np.random.uniform(params['longitude_lower_bound'], params['longitude_upper_bound'], 10).tolist()
+END_WPs['latitude'] = np.random.uniform(params['latitude_lower_bound'], params['latitude_upper_bound'], range(nUAVs)).tolist()
+END_WPs['longitude'] = np.random.uniform(params['longitude_lower_bound'], params['longitude_upper_bound'], range(nUAVs)).tolist()
 
 # use trajectory from generator
-
+evaluator = TrajectoryEvaluator(params, UAV_data)
+for u in range(nUAVs):
+    trajectoires = generate_all_trajectories(FLT_track[u]['latitude'][-1], FLT_track[u]['longitude'][-1], END_WPs['latitude'][u], END_WPs['longitude'][u], params, UAV_data)
+    optimal_trajectoires = evaluator.evaluate_trajectories(trajectoires)
+    GOAL_WPs[u] = dict()
+    GOAL_WPs[u]['latitude'] = optimal_trajectoires['latitude']
+    GOAL_WPs[u]['longitude'] = optimal_trajectoires['longitude']
+    GOAL_WPs[u]['altitude'] = optimal_trajectoires['altitude']
+    
+    
+    
 Uidx = 0 # ID of UAV
 
 FLT_track, FLT_conditions, current_wp_idx = gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_data)

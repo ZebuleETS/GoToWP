@@ -215,7 +215,7 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
     Args:
         FLT_track (list of dict): Flight track history for all UAVs, containing lists of latitude, longitude, altitude, etc.
         FLT_conditions (list of dict): Current flight conditions for all UAVs (airspeed, flight mode, etc.).
-        GOAL_WPs (dict): Dictionary of goal waypoints with keys 'latitude', 'longitude', and optionally 'altitude'.
+        GOAL_WPs (dict): Target waypoints for the UAV, structured as a dictionary with keys 'latitude', 'longitude', and 'altitude'.
         nUAVs (int): Total number of UAVs in the simulation.
         Uidx (int): Index of the UAV to update.
         params (dict): Simulation and UAV parameters (altitude bounds, time step, safe distance, etc.).
@@ -274,32 +274,19 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
         'longitude': FLT_track[Uidx]['longitude'][-1],
         'altitude': FLT_track[Uidx]['altitude'][-1]
     }
-    target_wp = {
-        'latitude': GOAL_WPs['latitude'][current_wp_idx],
-        'longitude': GOAL_WPs['longitude'][current_wp_idx],
-        'altitude': FLT_track[Uidx]['altitude'][-1]  # Keep same altitude for now
-    }
+    target_wp = GOAL_WPs[Uidx][current_wp_idx]
     
     # Check if we've reached the current waypoint
     distance_to_wp = compute_distance(current_pos, target_wp)[0]
     next_step_distance = FLT_conditions[Uidx]['airspeed'] * params['time_step']
     if distance_to_wp < params.get('waypoint_threshold', 10.0) or next_step_distance >= distance_to_wp:
         current_wp_idx += 1
-        if current_wp_idx >= len(GOAL_WPs['latitude']):
-            current_wp_idx = len(GOAL_WPs['latitude']) - 1  # Stay at the last waypoint
+        if current_wp_idx >= len(GOAL_WPs[Uidx]['latitude']):
+            current_wp_idx = len(GOAL_WPs[Uidx]['latitude']) - 1  # Stay at the last waypoint
         return FLT_track, FLT_conditions, current_wp_idx
-    
-    # Initialisation du calculateur de trajectoire
-    #calculator = TrajectoryCalculator(params, UAV_data)
-    
+
     # Obtention des données de vol actuelles
     FLT_data = get_current_flight_data(FLT_track, FLT_conditions, nUAVs)
-    
-    # Calcul des trajectoires possibles
-    #mode = FLT_data[Uidx]['flight_mode']
-    #candidate_sol = calculator.calculate_trajectories(FLT_data, Uidx, mode)
-
-    
     
     Hr = np.linspace(FLT_data[Uidx]['bearing'], FLT_data[Uidx]['bearing'] + max_turn_rate, h_step)
     Hl = np.linspace(FLT_data[Uidx]['bearing'] - max_turn_rate, FLT_data[Uidx]['bearing'], h_step)
@@ -471,8 +458,8 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
         pos['longitude'] = candidate_sol['longitude'][i]
         pos['altitude'] = candidate_sol['altitude'][i]
         dest = dict()
-        dest['latitude'] = GOAL_WPs['latitude'][current_wp_idx]  
-        dest['longitude'] = GOAL_WPs['longitude'][current_wp_idx]  
+        dest['latitude'] = GOAL_WPs[Uidx]['latitude'][current_wp_idx]  
+        dest['longitude'] = GOAL_WPs[Uidx]['longitude'][current_wp_idx]  
         dest['altitude'] = candidate_sol['altitude'][i]
         D0 = compute_distance(pos, dest)[0]
 
@@ -506,16 +493,14 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
 
     return FLT_track, FLT_conditions, current_wp_idx
 
-def gotoWaypointMulti(FLT_track: Dict, FLT_conditions: Dict, GOAL_WPs: Dict, 
-                    nUAVs: int, params: Dict, UAV_data: Dict, 
-                    current_wp_idx: Dict[int, int]) -> Tuple[Dict, Dict, Dict[int, int]]:
+def gotoWaypointMulti(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, params, UAV_data, current_wp_idx):
     """
     Gère et contrôle plusieurs UAVs simultanément, en suivant et en mettant à jour leur progression vers leurs waypoints respectifs.
 
     Args:
         FLT_track (dict): Historique des positions et états des UAVs.
         FLT_conditions (dict): Conditions de vol actuelles des UAVs.
-        GOAL_WPs (dict): Waypoints cibles (latitude, longitude).
+        GOAL_WPs (dict): Dictionnaire {Uidx: [ {'latitude', 'longitude', 'altitude'}] } pour chaque UAV.
         nUAVs (int): Nombre total de UAVs.
         params (dict): Paramètres de simulation.
         UAV_data (dict): Paramètres physiques du UAV (identiques pour tous ou par UAV).
@@ -529,7 +514,7 @@ def gotoWaypointMulti(FLT_track: Dict, FLT_conditions: Dict, GOAL_WPs: Dict,
         wp_idx = current_wp_idx.get(Uidx, 0)
         # Appeler la logique existante pour un seul UAV
         FLT_track, FLT_conditions, new_wp_idx = gotoWaypoint(
-            FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_data, wp_idx
+            FLT_track, FLT_conditions, GOAL_WPs[Uidx], nUAVs, Uidx, params, UAV_data, wp_idx
         )
         # Mettre à jour l'index du waypoint pour ce UAV
         current_wp_idx[Uidx] = new_wp_idx
