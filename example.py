@@ -94,11 +94,16 @@ END_WPs = dict()
 GOAL_WPs = dict()
 END_WPs['latitude'] = np.random.uniform(params['latitude_lower_bound'], params['latitude_upper_bound'], range(nUAVs)).tolist()
 END_WPs['longitude'] = np.random.uniform(params['longitude_lower_bound'], params['longitude_upper_bound'], range(nUAVs)).tolist()
+END_WPs['altitude'] = np.random.uniform(params['altitude_lower_bound'], params['altitude_upper_bound'], range(nUAVs)).tolist()
 
 # use trajectory from generator
 evaluator = TrajectoryEvaluator(params, UAV_data)
 for u in range(nUAVs):
-    trajectoires = generate_all_trajectories(FLT_track[u]['latitude'][-1], FLT_track[u]['longitude'][-1], END_WPs['latitude'][u], END_WPs['longitude'][u], params, UAV_data)
+    startPoint = dict()
+    startPoint['latitude'] = FLT_track[u]['latitude'][-1]
+    startPoint['longitude'] = FLT_track[u]['longitude'][-1]
+    startPoint['altitude'] = FLT_track[u]['altitude'][-1]
+    trajectoires = generate_all_trajectories(startPoint,END_WPs[u], params, UAV_data)
     optimal_trajectoires = evaluator.evaluate_trajectories(trajectoires, FLT_conditions[u])
     GOAL_WPs[u] = dict()
     GOAL_WPs[u]['latitude'] = optimal_trajectoires['latitude']
