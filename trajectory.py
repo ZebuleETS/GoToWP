@@ -10,6 +10,8 @@ from compute import (
     get_power_consumption,
 )
 from typing import Dict, List
+from scipy import interpolate
+from scipy.signal import savgol_filter
 
 class TrajectoryGenerator(ABC):
     """Abstract base class for trajectory generators"""
@@ -202,9 +204,14 @@ class DubinsPath3D(TrajectoryGenerator):
         if isinstance(altitudes, np.ndarray):
             altitudes = altitudes.tolist()
             
-        return {'latitude': latitudes, 'longitude': longitudes, 'altitude': altitudes}
-    
-    def _compute_dubins_path(self, start_point, end_point, bearing_start, bearing_end, 
+        trajectory = {'latitude': latitudes, 'longitude': longitudes, 'altitude': altitudes}
+        
+        smoother = TrajectorySmoothing(self.params)
+        trajectory = smoother.smooth_trajectory(trajectory, method='dubins_junctions')
+
+        return trajectory
+
+    def _compute_dubins_path(self, start_point, end_point, bearing_start, bearing_end,
                             config, num_points_total):
         """
         Calcule un chemin de Dubins selon une configuration spécifique.
@@ -290,7 +297,7 @@ class DubinsPath3D(TrajectoryGenerator):
                                                self.min_turn_radius, second_turn_dir)
         
         if tangent_point is None:
-            # Aucun point de tangence trouvé, cette configuration n'est pas valide
+            # Aucun point de tangente trouvé, cette configuration n'est pas valide
             return None, float('inf')
         
         # Générer le premier virage
@@ -513,12 +520,6 @@ class PythagoreanHodographPath(TrajectoryGenerator):
     """
     Pythagorean Hodograph path trajectory generator
     
-    Implémentation des courbes hodographes pythagoriciennes (PH) qui garantissent
-    une paramétrisation polynomiale avec une dérivée (hodographe) satisfaisant
-    l'identité pythagoricienne. Ces courbes offrent un contrôle précis de la vitesse
-    le long du parcours et des propriétés analytiques avantageuses pour la planification
-    de trajectoire des UAVs.
-    
     Args:
         params (dict): Parameters for the trajectory generation, e.g., number of points, degree, etc.
         UAV_data (dict): UAV data containing specifications like speed, altitude limits, etc.
@@ -607,7 +608,7 @@ class PythagoreanHodographPath(TrajectoryGenerator):
         Args:
             start (np.array): Point de départ en coordonnées cartésiennes [x, y, z]
             end (np.array): Point d'arrivée en coordonnées cartésiennes [x, y, z]
-            start_velocity (np.array): Vecteur vitesse initial [vx, vy, vz]
+            start_velocity (np.array): Vecteur vitesse initiale [vx, vy, vz]
             end_velocity (np.array): Vecteur vitesse final [vx, vy, vz]
             
         Returns:
@@ -819,6 +820,7 @@ def generate_all_trajectories(start_point, end_point, params, UAV_data):
     Returns:
         list: Liste avec toutes les trajectoires générées
     """
+    smoother = TrajectorySmoothing(params)
     # Générateur ligne droite
     straight_traj = StraightLineTrajectory(params, UAV_data)
     straight = straight_traj.generate_path(start_point, end_point)
@@ -826,10 +828,11 @@ def generate_all_trajectories(start_point, end_point, params, UAV_data):
     # Générateur courbe circulaire
     circular_traj = CircularTrajectory(params, UAV_data)
     circular = circular_traj.generate_path(start_point, end_point)
-
+    circular = smoother.smooth_trajectory(circular, method='savgol')
+     
     # Générateur Dubins 3D
+    # Le lissage est intégré dans generate_path pour Dubins
     dubins_traj = DubinsPath3D(params, UAV_data)
-    # Pour Dubins, il faut fournir les headings (cap) de départ/arrivée
     dubins = dubins_traj.generate_path(start_point, end_point)
 
     # Générateur Pythagorean Hodograph
@@ -995,3 +998,238 @@ class TrajectoryEvaluator:
             distance = compute_distance(start_point, end_point)[0]
             distances.append(distance)
         return np.sum(distances)
+
+class TrajectorySmoothing:
+    """
+    Classe fournissant des méthodes pour lisser les trajectoires générées.
+    
+    Permet d'améliorer la pilotabilité des trajectoires en assurant la continuité
+    de position (G0), de tangente (G1) et de courbure (G2).
+    """
+    
+    def __init__(self, params=None):
+        """
+        Initialise les paramètres de lissage.
+        
+        Args:
+            params (dict): Paramètres de lissage (facteur de lissage, etc.)
+        """
+        self.params = params or {}
+        self.smoothing_factor = params.get('smoothing_factor', 0.5)
+        self.window_size = params.get('smoothing_window', 5)
+        
+    def smooth_trajectory_spline(self, trajectory):
+        """
+        Lisse une trajectoire en utilisant des splines cubiques.
+        
+        Args:
+            trajectory (dict): Trajectoire à lisser {latitude: [], longitude: [], altitude: []}
+            
+        Returns:
+            dict: Trajectoire lissée {latitude: [], longitude: [], altitude: []}
+        """
+        # Extraire les points de la trajectoire
+        lats = np.array(trajectory['latitude'])
+        lons = np.array(trajectory['longitude'])
+        alts = np.array(trajectory['altitude'])
+        
+        # Paramètre pour la spline (distance cumulée le long de la trajectoire)
+        n = len(lats)
+        t = np.zeros(n)
+        for i in range(1, n):
+            pt1 = {'latitude': lats[i-1], 'longitude': lons[i-1]}
+            pt2 = {'latitude': lats[i], 'longitude': lons[i]}
+            t[i] = t[i-1] + compute_distance(pt1, pt2)[0]
+        
+        # Normaliser le paramètre entre 0 et 1
+        if t[-1] > 0:
+            t = t / t[-1]
+        
+        # Facteur de lissage (0 pour interpolation exacte, plus élevé pour plus de lissage)
+        s = self.smoothing_factor * n
+        
+        # Créer les splines pour chaque dimension
+        spline_lat = interpolate.splrep(t, lats, s=s)
+        spline_lon = interpolate.splrep(t, lons, s=s)
+        spline_alt = interpolate.splrep(t, alts, s=s)
+        
+        # Évaluer les splines sur une nouvelle grille
+        t_new = np.linspace(0, 1, n)
+        lats_smooth = interpolate.splev(t_new, spline_lat)
+        lons_smooth = interpolate.splev(t_new, spline_lon)
+        alts_smooth = interpolate.splev(t_new, spline_alt)
+        
+        # Retourner la trajectoire lissée
+        return {
+            'latitude': lats_smooth.tolist(),
+            'longitude': lons_smooth.tolist(),
+            'altitude': alts_smooth.tolist()
+        }
+        
+    def smooth_trajectory_savgol(self, trajectory):
+        """
+        Lisse une trajectoire en utilisant un filtre de Savitzky-Golay
+        qui préserve mieux les caractéristiques des données.
+        
+        Args:
+            trajectory (dict): Trajectoire à lisser {latitude: [], longitude: [], altitude: []}
+            
+        Returns:
+            dict: Trajectoire lissée {latitude: [], longitude: [], altitude: []}
+        """
+        # Extraire les points de la trajectoire
+        lats = np.array(trajectory['latitude'])
+        lons = np.array(trajectory['longitude'])
+        alts = np.array(trajectory['altitude'])
+        
+        # Définir la taille de la fenêtre et le degré polynomial
+        window_size = min(self.window_size, len(lats) - 1)
+        if window_size % 2 == 0:  # La taille de la fenêtre doit être impaire
+            window_size += 1
+        poly_order = min(3, window_size - 1)
+        
+        # Appliquer le filtre de Savitzky-Golay
+        if len(lats) > window_size:
+            lats_smooth = savgol_filter(lats, window_size, poly_order)
+            lons_smooth = savgol_filter(lons, window_size, poly_order)
+            alts_smooth = savgol_filter(alts, window_size, poly_order)
+        else:
+            # Si la trajectoire est trop courte, renvoyer la trajectoire originale
+            lats_smooth = lats
+            lons_smooth = lons
+            alts_smooth = alts
+        
+        # Retourner la trajectoire lissée
+        return {
+            'latitude': lats_smooth.tolist(),
+            'longitude': lons_smooth.tolist(),
+            'altitude': alts_smooth.tolist()
+        }
+    
+    def smooth_dubins_junctions(self, trajectory, num_junction_points=5):
+        """
+        Lisse spécifiquement les jonctions dans une trajectoire Dubins
+        en utilisant des courbes de Bézier cubiques.
+        
+        Args:
+            trajectory (dict): Trajectoire à lisser {latitude: [], longitude: [], altitude: []}
+            num_junction_points (int): Nombre de points à considérer autour des jonctions
+            
+        Returns:
+            dict: Trajectoire lissée aux jonctions {latitude: [], longitude: [], altitude: []}
+        """
+        # Extraire les points de la trajectoire
+        lats = np.array(trajectory['latitude'])
+        lons = np.array(trajectory['longitude'])
+        alts = np.array(trajectory['altitude'])
+        n = len(lats)
+        
+        if n < 10:  # Pas assez de points pour détecter les jonctions
+            return trajectory
+            
+        # Calculer les taux de virage pour détecter les jonctions
+        turn_rates = []
+        for i in range(1, n-1):
+            point1 = {'latitude': lats[i-1], 'longitude': lons[i-1]}
+            point2 = {'latitude': lats[i], 'longitude': lons[i]}
+            point3 = {'latitude': lats[i+1], 'longitude': lons[i+1]}
+            
+            bearing1 = compute_bearing(point1, point2)[0]
+            bearing2 = compute_bearing(point2, point3)[0]
+            
+            diff = abs((bearing2 - bearing1 + np.pi) % (2 * np.pi) - np.pi)
+            turn_rates.append(diff)
+        
+        # Seuil pour détecter les jonctions (taux de virage élevé)
+        threshold = np.percentile(turn_rates, 90)  # 90ème percentile
+        
+        # Trouver les indices des jonctions
+        junction_indices = [i + 1 for i, rate in enumerate(turn_rates) if rate > threshold]
+        
+        # Si aucune jonction trouvée, retourner la trajectoire originale
+        if not junction_indices:
+            return trajectory
+            
+        # Lisser chaque jonction détectée
+        new_lats = lats.copy()
+        new_lons = lons.copy()
+        new_alts = alts.copy()
+        
+        for idx in junction_indices:
+            # Assurer que nous avons assez de points autour de la jonction
+            start_idx = max(0, idx - num_junction_points)
+            end_idx = min(n, idx + num_junction_points + 1)
+            
+            # Points avant et après la jonction
+            pre_junction = (lats[start_idx:idx], lons[start_idx:idx])
+            post_junction = (lats[idx:end_idx], lons[idx:end_idx])
+            
+            # Créer une courbe de Bézier pour remplacer la jonction
+            t = np.linspace(0, 1, end_idx - start_idx)
+            
+            # Points de contrôle pour la courbe de Bézier
+            p0 = np.array([pre_junction[0][0], pre_junction[1][0]])
+            p3 = np.array([post_junction[0][-1], post_junction[1][-1]])
+            
+            # Directions tangentielles aux extrémités
+            if len(pre_junction[0]) > 1:
+                d0 = np.array([pre_junction[0][-1] - pre_junction[0][-2], 
+                              pre_junction[1][-1] - pre_junction[1][-2]])
+                d0 = d0 / np.linalg.norm(d0) if np.linalg.norm(d0) > 0 else np.array([1, 0])
+            else:
+                d0 = np.array([1, 0])
+                
+            if len(post_junction[0]) > 1:
+                d1 = np.array([post_junction[0][1] - post_junction[0][0], 
+                              post_junction[1][1] - post_junction[1][0]])
+                d1 = d1 / np.linalg.norm(d1) if np.linalg.norm(d1) > 0 else np.array([1, 0])
+            else:
+                d1 = np.array([1, 0])
+            
+            # Points de contrôle intermédiaires
+            control_dist = np.linalg.norm(p3 - p0) / 3
+            p1 = p0 + d0 * control_dist
+            p2 = p3 - d1 * control_dist
+            
+            # Évaluer la courbe de Bézier
+            bezier_points = np.zeros((len(t), 2))
+            for i, ti in enumerate(t):
+                bezier_points[i] = ((1-ti)**3 * p0 + 
+                                   3 * (1-ti)**2 * ti * p1 + 
+                                   3 * (1-ti) * ti**2 * p2 + 
+                                   ti**3 * p3)
+            
+            # Interpolation linéaire de l'altitude
+            alts_interp = np.interp(t, [0, 1], [alts[start_idx], alts[end_idx-1]])
+            
+            # Remplacer les points autour de la jonction
+            new_lats[start_idx:end_idx] = bezier_points[:, 0]
+            new_lons[start_idx:end_idx] = bezier_points[:, 1]
+            new_alts[start_idx:end_idx] = alts_interp
+        
+        # Retourner la trajectoire lissée
+        return {
+            'latitude': new_lats.tolist(),
+            'longitude': new_lons.tolist(),
+            'altitude': new_alts.tolist()
+        }
+        
+    def smooth_trajectory(self, trajectory, method='spline'):
+        """
+        Applique une méthode de lissage à la trajectoire.
+        
+        Args:
+            trajectory (dict): Trajectoire à lisser {latitude: [], longitude: [], altitude: []}
+            method (str): Méthode de lissage ('spline', 'savgol', 'dubins_junctions', 'all')
+            
+        Returns:
+            dict: Trajectoire lissée {latitude: [], longitude: [], altitude: []}
+        """
+        if method == 'spline':
+            return self.smooth_trajectory_spline(trajectory)
+        elif method == 'savgol':
+            return self.smooth_trajectory_savgol(trajectory)
+        elif method == 'dubins_junctions':
+            return self.smooth_dubins_junctions(trajectory)
+        else:
+            return trajectory  # Aucun lissage

@@ -1,5 +1,6 @@
 # ---------- EXAMPLE ----------
 
+from math import pi
 import numpy as np
 from GoToWP import gotoWaypointMulti
 from compute import get_destination_from_range_and_bearing
