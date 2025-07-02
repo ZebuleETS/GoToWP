@@ -69,8 +69,8 @@ class StraightLineTrajectory(TrajectoryGenerator):
             dest = get_destination_from_range_and_bearing(
                 start_point, d, initial_bearing
             )
-            latitudes.append(dest['latitude'])
-            longitudes.append(dest['longitude'])
+            latitudes.append(dest[0])
+            longitudes.append(dest[1])
         alt = np.linspace(start_point['altitude'], end_point['altitude'], num_points)
         return {'latitude': latitudes, 'longitude': longitudes, 'altitude': alt.tolist()}
 
@@ -96,7 +96,7 @@ class CircularTrajectory(TrajectoryGenerator):
         """
         num_points = self.params.get('num_points', 50)
         radius = self.params.get('radius', 100)  # rayon en mètres
-
+        print(type(start_point), type(end_point))
         # Calcul du centre du cercle (milieu géodésique)
         distance = compute_distance(start_point, end_point)[0]
         initial_bearing = compute_bearing(start_point, end_point)[0]

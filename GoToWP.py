@@ -373,7 +373,7 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
 
     return FLT_track, FLT_conditions, current_wp_idx
 
-def gotoWaypointMulti(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, params, UAV_data, current_wp_idx):
+def gotoWaypointMulti(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, params, UAV_data, current_wp_indices):
     """
     Gère et contrôle plusieurs UAVs simultanément, en suivant et en mettant à jour leur progression vers leurs waypoints respectifs.
 
@@ -391,11 +391,11 @@ def gotoWaypointMulti(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, params, UAV_da
     """
     for Uidx in range(nUAVs):
         # Récupérer l'index du waypoint courant pour ce UAV
-        wp_idx = current_wp_idx.get(Uidx, 0)
-        # Appeler la logique existante pour un seul UAV
+        wp_idx = current_wp_indices.get(Uidx, 0)
+
         FLT_track, FLT_conditions, new_wp_idx = gotoWaypoint(
             FLT_track, FLT_conditions, GOAL_WPs[Uidx], nUAVs, Uidx, params, UAV_data, wp_idx
         )
         # Mettre à jour l'index du waypoint pour ce UAV
-        current_wp_idx[Uidx] = new_wp_idx
-    return FLT_track, FLT_conditions, current_wp_idx
+        current_wp_indices[Uidx] = new_wp_idx
+    return FLT_track, FLT_conditions, current_wp_indices
