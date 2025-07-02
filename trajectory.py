@@ -66,11 +66,11 @@ class StraightLineTrajectory(TrajectoryGenerator):
         longitudes = []
         for f in fractions:
             d = distance * f
-            dest = get_destination_from_range_and_bearing(
+            dest_lat, dest_lon = get_destination_from_range_and_bearing(
                 start_point, d, initial_bearing
             )
-            latitudes.append(dest[0])
-            longitudes.append(dest[1])
+            latitudes.append(dest_lat)
+            longitudes.append(dest_lon)
         alt = np.linspace(start_point['altitude'], end_point['altitude'], num_points)
         return {'latitude': latitudes, 'longitude': longitudes, 'altitude': alt.tolist()}
 
