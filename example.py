@@ -102,17 +102,15 @@ for u in range(nUAVs):
     FLT_track[u]['flight_mode'].append('glide')
 
 
-
-print("End waypoints:", END_WPs)
 # use trajectory from generator
-evaluator = TrajectoryEvaluator(params, UAV_data)
+evaluator = TrajectoryEvaluator(params, UAV_data, FLT_conditions[u])
 for u in range(nUAVs):
     startPoint = dict()
     startPoint['latitude'] = FLT_track[u]['latitude'][-1]
     startPoint['longitude'] = FLT_track[u]['longitude'][-1]
     startPoint['altitude'] = FLT_track[u]['altitude'][-1]
     trajectoires = generate_all_trajectories(startPoint,END_WPs[u], params, UAV_data)
-    optimal_trajectoires = evaluator.evaluate_trajectories(trajectoires, FLT_conditions[u])
+    optimal_trajectoires = evaluator.evaluate_trajectories(trajectoires)
     GOAL_WPs[u]['latitude'] = optimal_trajectoires['latitude']
     GOAL_WPs[u]['longitude'] = optimal_trajectoires['longitude']
     GOAL_WPs[u]['altitude'] = optimal_trajectoires['altitude']
@@ -129,6 +127,5 @@ while True:
 
     # Call the gotoWaypointMulti function to update the flight track and conditions
     FLT_track, FLT_conditions, current_wp_indices = gotoWaypointMulti(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, params, UAV_data, current_wp_indices)
-    print(FLT_track)
     print(FLT_conditions)
     print(current_wp_indices)

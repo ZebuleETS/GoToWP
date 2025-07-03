@@ -364,3 +364,16 @@ def compute_bearing(pos, dest):
         course = atan2(y, x)
         init_course.append(course + (2 * pi) % (2 * pi))
     return init_course
+
+def extract_waypoint(waypoint_with_lists):
+    """
+    Convertit un waypoint au format liste en format scalaire
+    
+    Input: {'latitude': [val], 'longitude': [val], 'altitude': [val]}
+    Output: {'latitude': val, 'longitude': val, 'altitude': val}
+    """
+    return {
+        'latitude': waypoint_with_lists['latitude'][0],
+        'longitude': waypoint_with_lists['longitude'][0],
+        'altitude': waypoint_with_lists['altitude'][0]
+    }

@@ -5,6 +5,7 @@ from compute import (
     cartesian_to_geographic,
     compute_bearing,
     compute_distance,
+    extract_waypoint,
     geographic_to_cartesian,
     get_destination_from_range_and_bearing,
     get_power_consumption,
@@ -56,7 +57,7 @@ class StraightLineTrajectory(TrajectoryGenerator):
             dict: Points de trajectoire {latitude: [], longitude: [], altitude: []}
         """
         num_points = self.params.get('num_points', 50)
-
+        end_point = extract_waypoint(end_point)
         distance = compute_distance(start_point, end_point)[0]
         initial_bearing = compute_bearing(start_point, end_point)[0]
 
@@ -96,7 +97,7 @@ class CircularTrajectory(TrajectoryGenerator):
         """
         num_points = self.params.get('num_points', 50)
         radius = self.params.get('radius', 100)  # rayon en mètres
-        print(type(start_point), type(end_point))
+        end_point = extract_waypoint(end_point)
         # Calcul du centre du cercle (milieu géodésique)
         distance = compute_distance(start_point, end_point)[0]
         initial_bearing = compute_bearing(start_point, end_point)[0]
@@ -161,7 +162,7 @@ class DubinsPath3D(TrajectoryGenerator):
             dict: Points de trajectoire {latitude: [], longitude: [], altitude: []}
         """
         num_points_total = self.params.get('num_points', 100)
-        
+        end_point = extract_waypoint(end_point)
         # Calculer le cap initial et final
         bearing_start = 0  # Par défaut, on suppose que le drone pointe vers l'Est
         if 'bearing' in start_point:
@@ -288,6 +289,7 @@ class DubinsPath3D(TrajectoryGenerator):
             'longitude': 0,
             'altitude': end_point['altitude']
         }
+        
         second_center['latitude'], second_center['longitude'] = get_destination_from_range_and_bearing(
             end_point, self.min_turn_radius, second_center_bearing
         )
@@ -530,7 +532,7 @@ class PythagoreanHodographPath(TrajectoryGenerator):
     
     def generate_path(self, start_point, end_point) -> Dict:
         num_points = self.params.get('num_points', 100)
-        
+        end_point = extract_waypoint(end_point)
         # Conversion en coordonnées cartésiennes pour simplifier les calculs
         start_xyz = self._geodetic_to_cartesian(start_point)
         end_xyz = self._geodetic_to_cartesian(end_point)
@@ -828,7 +830,7 @@ def generate_all_trajectories(start_point, end_point, params, UAV_data):
     # Générateur courbe circulaire
     circular_traj = CircularTrajectory(params, UAV_data)
     circular = circular_traj.generate_path(start_point, end_point)
-    circular = smoother.smooth_trajectory(circular, method='savgol')
+    #circular = smoother.smooth_trajectory(circular, method='savgol')
      
     # Générateur Dubins 3D
     # Le lissage est intégré dans generate_path pour Dubins
@@ -844,8 +846,8 @@ def generate_all_trajectories(start_point, end_point, params, UAV_data):
 
 class TrajectoryEvaluator:
     """Classe pour évaluer les trajectoires générées"""
-    
-    def __init__(self, params: Dict, UAV_data: Dict, ):
+
+    def __init__(self, params: Dict, UAV_data: Dict, flight_conditions: Dict):
         self.params = params
         self.UAV_data = UAV_data
         self.weights = {
@@ -857,9 +859,9 @@ class TrajectoryEvaluator:
         }
         self.alt_min = params['altitude_lower_bound']
         self.alt_max = params['altitude_upper_bound']
-    
+        self.FLIGHT_CONDITIONS = flight_conditions
 
-    def evaluate_trajectory(self, trajectories: List[Dict]) -> Dict:
+    def evaluate_trajectories(self, trajectories: List[Dict]) -> Dict:
         """
         Pour chaque drone, évalue toutes les trajectoires possibles et retourne la meilleure selon le score.
         Args:
@@ -873,7 +875,7 @@ class TrajectoryEvaluator:
         best_trajectory = None
         best_score = float('inf')
         for trajectory in trajectories:
-            score = self._evaluate_single_trajectory(trajectory)
+            score = self._evaluate_single_trajectory(trajectory, self.FLIGHT_CONDITIONS)
             if score < best_score:
                 best_score = score
                 best_trajectory = trajectory
@@ -953,10 +955,10 @@ class TrajectoryEvaluator:
                 power = get_power_consumption(self.UAV_data, FLT_conditions)
                 # Convertir la puissance (W) en énergie (Wh) pour ce segment
                 energy_segment = power * (time_step / 3600)
+                # Mettre à jour la consommation totale et la batterie restante
+                total_consumption += energy_segment
+                current_battery -= energy_segment
             
-            # Mettre à jour la consommation totale et la batterie restante
-            total_consumption += energy_segment
-            current_battery -= energy_segment
         
         # Vérifier si la trajectoire est faisable avec la batterie disponible
         is_feasible = current_battery >= self.UAV_data.get('desired_reserved_battery_capacity', 0)

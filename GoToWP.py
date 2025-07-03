@@ -154,15 +154,19 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
         'longitude': FLT_track[Uidx]['longitude'][-1],
         'altitude': FLT_track[Uidx]['altitude'][-1]
     }
-    target_wp = GOAL_WPs[Uidx][current_wp_idx]
+    target_wp = {
+    'latitude': GOAL_WPs['latitude'][current_wp_idx],
+    'longitude': GOAL_WPs['longitude'][current_wp_idx],
+    'altitude': GOAL_WPs['altitude'][current_wp_idx]
+    }
     
     # Check if we've reached the current waypoint
     distance_to_wp = compute_distance(current_pos, target_wp)[0]
     next_step_distance = FLT_conditions[Uidx]['airspeed'] * params['time_step']
     if distance_to_wp < params.get('waypoint_threshold', 10.0) or next_step_distance >= distance_to_wp:
         current_wp_idx += 1
-        if current_wp_idx >= len(GOAL_WPs[Uidx]['latitude']):
-            current_wp_idx = len(GOAL_WPs[Uidx]['latitude']) - 1  # Stay at the last waypoint
+        if current_wp_idx >= len(GOAL_WPs['latitude']):
+            current_wp_idx = len(GOAL_WPs['latitude']) - 1  # Stay at the last waypoint
         return FLT_track, FLT_conditions, current_wp_idx
 
     # Obtention des données de vol actuelles
@@ -338,9 +342,9 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
         pos['longitude'] = candidate_sol['longitude'][i]
         pos['altitude'] = candidate_sol['altitude'][i]
         dest = dict()
-        dest['latitude'] = GOAL_WPs[Uidx]['latitude'][current_wp_idx]  
-        dest['longitude'] = GOAL_WPs[Uidx]['longitude'][current_wp_idx]  
-        dest['altitude'] = candidate_sol['altitude'][i]
+        dest['latitude'] = GOAL_WPs['latitude'][current_wp_idx]  
+        dest['longitude'] = GOAL_WPs['longitude'][current_wp_idx]  
+        dest['altitude'] = GOAL_WPs['altitude'][current_wp_idx]
         D0 = compute_distance(pos, dest)[0]
 
         C_safety.append(-float(VO_flag[i] and PO_flag[i]))
@@ -391,7 +395,7 @@ def gotoWaypointMulti(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, params, UAV_da
     """
     for Uidx in range(nUAVs):
         # Récupérer l'index du waypoint courant pour ce UAV
-        wp_idx = current_wp_indices.get(Uidx, 0)
+        wp_idx = current_wp_indices[Uidx]
 
         FLT_track, FLT_conditions, new_wp_idx = gotoWaypoint(
             FLT_track, FLT_conditions, GOAL_WPs[Uidx], nUAVs, Uidx, params, UAV_data, wp_idx
