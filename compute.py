@@ -377,3 +377,131 @@ def extract_waypoint(waypoint_with_lists):
         'longitude': waypoint_with_lists['longitude'][0],
         'altitude': waypoint_with_lists['altitude'][0]
     }
+    
+def compute_distance_cartesian(pos, dest):
+    """
+    Calcule la distance 3D euclidienne entre deux points cartésiens.
+
+    Args:
+        pos (dict): Position de départ (X, Y, Z).
+        dest (dict): Position de destination (X, Y, Z).
+
+    Returns:
+        list: Liste des distances (mètres) pour chaque destination.
+    """
+    if isinstance(pos['Z'], list):
+        pos_z = pos['Z'][-1]
+    else:
+        pos_z = pos['Z']
+
+    dest_z = dest['Z']
+    vert_dist = []
+
+    if isinstance(dest_z, float):
+        dest_z = [dest_z]
+
+    n = len(dest_z)
+
+    for i in range(n):
+        if isinstance(dest_z[i], list):
+            dest_z[i] = dest_z[i][0]
+
+        vert_dist.append(dest_z[i] - pos_z)
+
+    # Distance horizontale dans le plan X-Y
+    horizontal_dis = compute_horizontal_distance_cartesian(pos, dest)
+
+    # Distance euclidienne 3D
+    vert_dist_temp = [x ** 2 for x in vert_dist]
+    horizontal_dis_temp = [x ** 2 for x in horizontal_dis]
+    distance_temp = [sum(x) for x in zip(vert_dist_temp, horizontal_dis_temp)]
+    distance = [sqrt(x) for x in distance_temp]
+    
+    return distance
+
+def compute_horizontal_distance_cartesian(pos, dest):
+    """
+    Calcule la distance horizontale (plan X-Y) entre deux points cartésiens.
+
+    Args:
+        pos (dict): Position de départ (X, Y).
+        dest (dict): Position de destination (X, Y).
+
+    Returns:
+        list: Liste des distances (mètres) pour chaque destination.
+    """
+    if isinstance(pos['X'], list):
+        pos_x = pos['X'][-1]
+        pos_y = pos['Y'][-1]
+    else:
+        pos_x = pos['X']
+        pos_y = pos['Y']
+
+    dest_x = dest['X']
+    dest_y = dest['Y']
+
+    if isinstance(dest_x, float):
+        dest_x = [dest_x]
+        dest_y = [dest_y]
+
+    n = len(dest_x)
+    
+    distance = []
+    for i in range(n):
+        if isinstance(dest_x[i], list):
+            dest_x[i] = dest_x[i][0]
+            dest_y[i] = dest_y[i][0]
+
+        # Distance euclidienne dans le plan X-Y
+        dx = dest_x[i] - pos_x
+        dy = dest_y[i] - pos_y
+        distance.append(sqrt(dx**2 + dy**2))
+
+    return distance
+
+def compute_bearing_cartesian(pos, dest):
+    """
+    Calcule l'azimut (bearing) entre deux points en coordonnées cartésiennes.
+    
+    Args:
+        pos (dict): Position de départ (X, Y).
+        dest (dict): Position de destination (X, Y).
+    
+    Returns:
+        list: Liste des azimuts (radians) pour chaque destination.
+    """
+    if isinstance(pos['X'], list):
+        pos_x = pos['X'][-1]
+        pos_y = pos['Y'][-1]
+    else:
+        pos_x = pos['X']
+        pos_y = pos['Y']
+
+    dest_x = dest['X']
+    dest_y = dest['Y']
+
+    if isinstance(dest_x, float):
+        dest_x = [dest_x]
+        dest_y = [dest_y]
+
+    n = len(dest_x)
+    
+    azimuts = []
+    for i in range(n):
+        if isinstance(dest_x[i], list):
+            dest_x[i] = dest_x[i][0]
+            dest_y[i] = dest_y[i][0]
+
+        # Calculer les différences en X et Y
+        dx = dest_x[i] - pos_x
+        dy = dest_y[i] - pos_y
+        
+        # Calculer l'azimut dans le plan X-Y
+        azimut = atan2(dy, dx)
+        
+        # Normaliser l'angle dans l'intervalle [0, 2π]
+        azimut = (azimut + (2 * pi)) % (2 * pi)
+        
+        azimuts.append(azimut)
+    
+    return azimuts
