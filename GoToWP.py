@@ -204,6 +204,8 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
                 candidate_sol['flight_mode'].append('glide')
                 candidate_sol['airspeed'].append(V[j])
                 candidate_sol['flight_path_angle'].append(0.0)
+                
+
 
                 lat, lon = get_destination_from_range_and_bearing(REF, pridction_distance, H[i])
                 PB_temp['latitude'].append(lat)
@@ -369,7 +371,13 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
     FLT_track[Uidx]['longitude'].append(candidate_sol['longitude'][idx])
     FLT_track[Uidx]['altitude'].append(candidate_sol['altitude'][idx])
     FLT_track[Uidx]['bearing'].append(candidate_sol['bearing'][idx])
-    FLT_track[Uidx]['flight_mode'].append(candidate_sol['flight_mode'][idx])
+
+    if FLT_track[Uidx]['altitude'][-1] <= LBz:
+        FLT_track[Uidx]['flight_mode'].append('engine')
+    elif FLT_track[Uidx]['altitude'][-1] >= UBz:
+        FLT_track[Uidx]['flight_mode'].append('glide')
+    else:
+        FLT_track[Uidx]['flight_mode'].append(candidate_sol['flight_mode'][idx])
     FLT_track[Uidx]['battery_capacity'].append(candidate_sol['battery_capacity'][idx])
 
     FLT_conditions[Uidx]['airspeed'] = candidate_sol['airspeed'][idx]

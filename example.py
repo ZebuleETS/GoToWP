@@ -3,7 +3,7 @@
 from math import pi
 import numpy as np
 from GoToWP import gotoWaypointMulti
-from compute import get_destination_from_range_and_bearing
+from compute import compute_distance, get_destination_from_range_and_bearing
 from trajectory import TrajectoryEvaluator, generate_all_trajectories
 
 
@@ -88,7 +88,6 @@ for u in range(nUAVs):
     FLT_conditions[u]['air_density'] = air_density
     FLT_conditions[u]['battery_capacity'] = UAV_data['maximum_battery_capacity']
 
-    
     END_WPs[u]['latitude'].append(np.random.uniform(params['latitude_lower_bound'], params['latitude_upper_bound'], 1)[0].tolist())
     END_WPs[u]['longitude'].append(np.random.uniform(params['longitude_lower_bound'], params['longitude_upper_bound'], 1)[0].tolist())
     END_WPs[u]['altitude'].append(400.0)
@@ -120,6 +119,15 @@ current_wp_indices = dict()
 for u in range(nUAVs):
     current_wp_indices[u] = 0  # Initialize the current waypoint index for each UAV 
 
+#print(f'Fin: {GOAL_WPs[0]}')
+#print(f'Début: {startPoint}')
+#D2 = compute_distance(startPoint, GOAL_WPs[0])
+#print(f'distance: {D2}')
+last_pos = {
+        'latitude': FLT_track[0]['latitude'][-1],
+        'longitude': FLT_track[0]['longitude'][-1],
+        'altitude': FLT_track[0]['altitude'][-1]
+    }
 while True:
     # Check if all UAVs have reached their goal waypoints
     if all(current_wp_indices[u] >= len(GOAL_WPs[u]['latitude']) for u in range(nUAVs)):
@@ -127,5 +135,15 @@ while True:
 
     # Call the gotoWaypointMulti function to update the flight track and conditions
     FLT_track, FLT_conditions, current_wp_indices = gotoWaypointMulti(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, params, UAV_data, current_wp_indices)
-    print(FLT_conditions)
+    #print(FLT_conditions[0]['airspeed'])
+    #current_pos = {
+    #    'latitude': FLT_track[0]['latitude'][-1],
+    #    'longitude': FLT_track[0]['longitude'][-1],
+    #    'altitude': FLT_track[0]['altitude'][-1]
+    #}
+    #D = compute_distance(last_pos, current_pos)
+    #print(D)
+    print(FLT_track[0]['latitude'])
+    print(FLT_track[0]['longitude'])
+    print(FLT_track[0]['altitude'])
     print(current_wp_indices)
