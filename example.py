@@ -39,10 +39,10 @@ lbLON = np.copy(lon).tolist()
 
 params = dict()
 params['working_floor'] = 600.0
-params['X_lower_bound'] = lbLAT
-params['X_upper_bound'] = ubLAT
-params['Y_lower_bound'] = lbLON
-params['Y_upper_bound'] = ubLON
+params['X_lower_bound'] = 0.0
+params['X_upper_bound'] = 6000.0
+params['Y_lower_bound'] = 0.0
+params['Y_upper_bound'] = 6000.0
 params['Z_lower_bound'] = 200.0
 params['Z_upper_bound'] = 1000.0
 params['current_simulation_time'] = 0.0
