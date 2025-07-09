@@ -133,7 +133,6 @@ def get_sink_rate(uav_data, flight_conditions):
 
     return sink_rate
 
-
 def get_destination_from_range_and_bearing(starting_point, distance, bearing):
     """
     Calculates the geographic position reached after traveling a given distance along an initial bearing.
@@ -176,9 +175,9 @@ def get_current_flight_data(FLT_track, FLT_conditions, nUAVs):
     FLT_data = {k: {} for k in range(nUAVs)}
     for u in range(nUAVs):
         FLT_data[u] = dict()
-        FLT_data[u]['latitude'] = FLT_track[u]['latitude'][-1]
-        FLT_data[u]['longitude'] = FLT_track[u]['longitude'][-1]
-        FLT_data[u]['altitude'] = FLT_track[u]['altitude'][-1]
+        FLT_data[u]['X'] = FLT_track[u]['X'][-1]
+        FLT_data[u]['Y'] = FLT_track[u]['Y'][-1]
+        FLT_data[u]['Z'] = FLT_track[u]['Z'][-1]
         FLT_data[u]['bearing'] = FLT_track[u]['bearing'][-1]
         FLT_data[u]['battery_capacity'] = FLT_track[u]['battery_capacity'][-1]
         FLT_data[u]['flight_mode'] = FLT_track[u]['flight_mode'][-1]
@@ -295,7 +294,7 @@ def compute_great_circle_dist(pos, dest):
         dest (dict): Destination position (latitude, longitude).
 
     Returns:
-        list: List of distances (meters) for each destination.
+        list: Liste des distances (mètres) pour chaque destination.
     """
     if isinstance(pos['latitude'], list):
         pos_lat = pos['latitude'][-1]
@@ -333,14 +332,14 @@ def compute_great_circle_dist(pos, dest):
 
 def compute_bearing(pos, dest):
     """
-    Calculates the initial bearing (azimuth) between two geographic points.
+    Calcule l'azimut initial entre deux points cartésiens.
 
     Args:
-        pos (dict): Start position (latitude, longitude).
-        dest (dict): Destination position (latitude, longitude).
+        pos (dict): Position de départ (X, Y).
+        dest (dict): Position de destination (X, Y).
 
     Returns:
-        list: List of bearings (radians) for each destination.
+        list: Liste des azimuts (radians) pour chaque destination.
     """
     pos_lat = pos['latitude']
     pos_lon = pos['longitude']
@@ -369,13 +368,13 @@ def extract_waypoint(waypoint_with_lists):
     """
     Convertit un waypoint au format liste en format scalaire
     
-    Input: {'latitude': [val], 'longitude': [val], 'altitude': [val]}
-    Output: {'latitude': val, 'longitude': val, 'altitude': val}
+    Input: {'X': [val], 'Y': [val], 'Z': [val]}
+    Output: {'X': val, 'Y': val, 'Z': val}
     """
     return {
-        'latitude': waypoint_with_lists['latitude'][0],
-        'longitude': waypoint_with_lists['longitude'][0],
-        'altitude': waypoint_with_lists['altitude'][0]
+        'X': waypoint_with_lists['X'][0],
+        'Y': waypoint_with_lists['Y'][0],
+        'Z': waypoint_with_lists['Z'][0]
     }
     
 def compute_distance_cartesian(pos, dest):
@@ -505,3 +504,23 @@ def compute_bearing_cartesian(pos, dest):
         azimuts.append(azimut)
     
     return azimuts
+
+def get_destination_from_range_and_bearing_cartesian(starting_point, distance, bearing):
+    """
+    Calcule la position cartésienne atteinte après avoir voyagé une distance donnée le long d'un azimut initial.
+
+    Args:
+        starting_point (dict): Point de départ (X, Y).
+        distance (float): Distance à parcourir (m).
+        bearing (float): Azimut initial (radians).
+
+    Returns:
+        tuple: (X, Y) de la destination.
+    """
+    x = starting_point['X']
+    y = starting_point['Y']
+
+    destination_x = x + distance * cos(bearing)
+    destination_y = y + distance * sin(bearing)
+
+    return destination_x, destination_y

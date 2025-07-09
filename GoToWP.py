@@ -8,7 +8,7 @@ from compute import (
     get_current_flight_data,
     get_power_consumption,
     get_sink_rate,
-    get_destination_from_range_and_bearing
+    get_destination_from_range_and_bearing_cartesian
 )
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -119,15 +119,15 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
     VO_flag = list()
     PO_flag = list()
     PB_temp = dict()
-    PB_temp['latitude'] = []
-    PB_temp['longitude'] = []
-    PB_temp['altitude'] = []
+    PB_temp['X'] = []
+    PB_temp['Y'] = []
+    PB_temp['Z'] = []
 
     
     candidate_sol = dict()
-    candidate_sol['latitude'] = []
-    candidate_sol['longitude'] = []
-    candidate_sol['altitude'] = []
+    candidate_sol['X'] = []
+    candidate_sol['Y'] = []
+    candidate_sol['Z'] = []
     candidate_sol['bearing'] = []
     candidate_sol['battery_capacity'] = []
     candidate_sol['flight_mode'] = []
@@ -135,8 +135,8 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
     candidate_sol['flight_path_angle'] = []
     
     # Initialize flight conditions for the UAV
-    LBz = params['altitude_lower_bound']
-    UBz = params['altitude_upper_bound']
+    LBz = params['Z_lower_bound']
+    UBz = params['Z_upper_bound']
     Tsim_current = params['current_simulation_time']
     t_step = params['time_step']
     h_step = params['bearing_step']
@@ -150,14 +150,14 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
 
     # Current position and target waypoint
     current_pos = {
-        'latitude': FLT_track[Uidx]['latitude'][-1],
-        'longitude': FLT_track[Uidx]['longitude'][-1],
-        'altitude': FLT_track[Uidx]['altitude'][-1]
+        'X': FLT_track[Uidx]['X'][-1],
+        'Y': FLT_track[Uidx]['Y'][-1],
+        'Z': FLT_track[Uidx]['Z'][-1]
     }
     target_wp = {
-    'latitude': GOAL_WPs['latitude'][current_wp_idx],
-    'longitude': GOAL_WPs['longitude'][current_wp_idx],
-    'altitude': GOAL_WPs['altitude'][current_wp_idx]
+        'X': GOAL_WPs['X'][current_wp_idx],
+        'Y': GOAL_WPs['Y'][current_wp_idx],
+        'Z': GOAL_WPs['Z'][current_wp_idx]
     }
     
     # Check if we've reached the current waypoint
@@ -165,8 +165,8 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
     next_step_distance = FLT_conditions[Uidx]['airspeed'] * params['time_step']
     if distance_to_wp < params.get('waypoint_threshold', 10.0) or next_step_distance >= distance_to_wp:
         current_wp_idx += 1
-        if current_wp_idx >= len(GOAL_WPs['latitude']):
-            current_wp_idx = len(GOAL_WPs['latitude']) - 1  # Stay at the last waypoint
+        if current_wp_idx >= len(GOAL_WPs['X']):
+            current_wp_idx = len(GOAL_WPs['X']) - 1  # Stay at the last waypoint
         return FLT_track, FLT_conditions, current_wp_idx
 
     # Obtention des données de vol actuelles
@@ -186,19 +186,19 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
                 FLT_conditions[Uidx]['airspeed'] = V[j]
                 FLT_conditions[Uidx]['airspeed_dot'] = 0.0
                 dZ = get_sink_rate(UAV_data, FLT_conditions[Uidx])
-                pridction_distance = (abs(FLT_data[Uidx]['altitude'] - LBz)/dZ)*V[j]
+                pridction_distance = (abs(FLT_data[Uidx]['Z'] - LBz)/dZ)*V[j] if dZ != 0 else V[j] * t_step
                 TD = V[j] * t_step
                 dZ = -dZ * t_step
 
                 REF = dict()
-                REF['latitude'] = FLT_data[Uidx]['latitude']
-                REF['longitude'] = FLT_data[Uidx]['longitude']
-                lat, lon = get_destination_from_range_and_bearing(REF, TD, H[i])
-                alt = min(max(FLT_data[Uidx]['altitude']+dZ, LBz), UBz)
+                REF['X'] = FLT_data[Uidx]['X']
+                REF['Y'] = FLT_data[Uidx]['Y']
+                x_new, y_new = get_destination_from_range_and_bearing_cartesian(REF, TD, H[i])
+                alt = min(max(FLT_data[Uidx]['Z']+dZ, LBz), UBz)
 
-                candidate_sol['latitude'].append(lat)
-                candidate_sol['longitude'].append(lon)
-                candidate_sol['altitude'].append(alt)
+                candidate_sol['X'].append(x_new)
+                candidate_sol['Y'].append(y_new)
+                candidate_sol['Z'].append(alt)
                 candidate_sol['bearing'].append(H[i])
                 candidate_sol['battery_capacity'].append(FLT_data[Uidx]['battery_capacity'])
                 candidate_sol['flight_mode'].append('glide')
@@ -206,11 +206,10 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
                 candidate_sol['flight_path_angle'].append(0.0)
                 
 
-
-                lat, lon = get_destination_from_range_and_bearing(REF, pridction_distance, H[i])
-                PB_temp['latitude'].append(lat)
-                PB_temp['longitude'].append(lon)
-                PB_temp['altitude'].append(LBz)
+                x_pred, y_pred = get_destination_from_range_and_bearing_cartesian(REF, pridction_distance, H[i])
+                PB_temp['X'].append(x_pred)
+                PB_temp['Y'].append(y_pred)
+                PB_temp['Z'].append(LBz)
 
     elif FLT_data[Uidx]['flight_mode'] == 'engine':
         for i in range(len(H)):
@@ -218,110 +217,109 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
                 FLT_conditions[Uidx]['airspeed'] = V[j]
                 FLT_conditions[Uidx]['airspeed_dot'] = 0.0
                 dZ = V[j] * t_step
-                pridction_distance = (abs(UBz - FLT_data[Uidx]['altitude'])/dZ)*V[j]
+                pridction_distance = (abs(UBz - FLT_data[Uidx]['Z'])/dZ)*V[j] if dZ != 0 else V[j] * t_step
                 pwr = get_power_consumption(UAV_data, FLT_conditions[Uidx])
                 power_consumption = pwr * (t_step / 3600)
 
                 REF = dict()
-                REF['latitude'] = FLT_data[Uidx]['latitude']
-                REF['longitude'] = FLT_data[Uidx]['longitude']
-                lat, lon = get_destination_from_range_and_bearing(REF, dZ, H[i])
-                alt = min(max(FLT_data[Uidx]['altitude']+dZ, LBz), UBz)
+                REF['X'] = FLT_data[Uidx]['X']
+                REF['Y'] = FLT_data[Uidx]['Y']
+                x_new, y_new = get_destination_from_range_and_bearing_cartesian(REF, dZ, H[i])
+                alt = min(max(FLT_data[Uidx]['Z']+dZ, LBz), UBz)
 
-                candidate_sol['latitude'].append(lat)
-                candidate_sol['longitude'].append(lon)
-                candidate_sol['altitude'].append(alt)
+                candidate_sol['X'].append(x_new)
+                candidate_sol['Y'].append(y_new)
+                candidate_sol['Z'].append(alt)
                 candidate_sol['bearing'].append(H[i])
                 candidate_sol['battery_capacity'].append(FLT_data[Uidx]['battery_capacity']-power_consumption)
                 candidate_sol['flight_mode'].append('engine')
                 candidate_sol['airspeed'].append(V[j])
                 candidate_sol['flight_path_angle'].append(0.0)
 
-                lat, lon = get_destination_from_range_and_bearing(REF, pridction_distance, H[i])
-                PB_temp['latitude'].append(lat)
-                PB_temp['longitude'].append(lon)
-                PB_temp['altitude'].append(UBz)
-                
+                x_pred, y_pred = get_destination_from_range_and_bearing_cartesian(REF, pridction_distance, H[i])
+                PB_temp['X'].append(x_pred)
+                PB_temp['Y'].append(y_pred)
+                PB_temp['Z'].append(UBz)
     
     # Check for obstacles and compute safety constraints
     Dist2Horizon = dict()
-    Dist2Horizon['latitude'] = []
-    Dist2Horizon['longitude'] = []
-    Dist2Horizon['altitude'] = []
+    Dist2Horizon['X'] = []
+    Dist2Horizon['Y'] = []
+    Dist2Horizon['Z'] = []
 
     for o in range(len(ObstacleUAVs)):
         u = ObstacleUAVs[o]
         if FLT_data[u]['flight_mode'] == 'glide':
             dZ = get_sink_rate(UAV_data, FLT_conditions[u])*t_step
-            pridction_distance = (abs(FLT_data[u]['altitude'] - LBz) / dZ)*FLT_data[u]['airspeed']
+            pridction_distance = (abs(FLT_data[u]['Z'] - LBz) / dZ)*FLT_data[u]['airspeed'] if dZ != 0 else FLT_data[u]['airspeed'] * t_step
 
         elif FLT_data[u]['flight_mode'] == 'engine':
             dZ = FLT_data[u]['airspeed']*t_step
-            pridction_distance = (abs(UBz - FLT_data[u]['altitude']) / dZ)*FLT_data[u]['airspeed']
+            pridction_distance = (abs(UBz - FLT_data[u]['Z']) / dZ)*FLT_data[u]['airspeed'] if dZ != 0 else FLT_data[u]['airspeed'] * t_step
 
         REF = dict()
-        REF['latitude'] = FLT_data[u]['latitude']
-        REF['longitude'] = FLT_data[u]['longitude']
-        lat, lon = get_destination_from_range_and_bearing(REF, pridction_distance, FLT_data[u]['bearing'])
-        Dist2Horizon['latitude'].append(lat)
-        Dist2Horizon['longitude'].append(lon)
-        Dist2Horizon['altitude'].append(LBz)
+        REF['X'] = FLT_data[u]['X']
+        REF['Y'] = FLT_data[u]['Y']
+        x_obs, y_obs = get_destination_from_range_and_bearing_cartesian(REF, pridction_distance, FLT_data[u]['bearing'])
+        Dist2Horizon['X'].append(x_obs)
+        Dist2Horizon['Y'].append(y_obs)
+        Dist2Horizon['Z'].append(LBz)
 
-    x0, y0, z0 = geographic_to_cartesian(FLT_data[Uidx]['latitude'], FLT_data[Uidx]['longitude'])
+    x0, y0, z0 = FLT_data[Uidx]['X'], FLT_data[Uidx]['Y'], FLT_data[Uidx]['Z']
 
     for i in range(len(H)*len(V)):
         flag1 = True
         flag2 = True
-        xx0, yy0, zz0 = geographic_to_cartesian(PB_temp['latitude'][i], PB_temp['longitude'][i])
+        xx0, yy0, zz0 = PB_temp['X'][i], PB_temp['Y'][i], PB_temp['Z'][i]
 
         for o in range(len(ObstacleUAVs)):
             u = ObstacleUAVs[o]
             pos = dict()
-            pos['latitude'] = FLT_data[u]['latitude']
-            pos['longitude'] = FLT_data[u]['longitude']
-            pos['altitude'] = FLT_data[u]['altitude']
+            pos['X'] = FLT_data[u]['X']
+            pos['Y'] = FLT_data[u]['Y']
+            pos['Z'] = FLT_data[u]['Z']
             dest = dict()
-            dest['latitude'] = candidate_sol['latitude'][i]
-            dest['longitude'] = candidate_sol['longitude'][i]
-            dest['altitude'] = candidate_sol['altitude'][i]
+            dest['X'] = candidate_sol['X'][i]
+            dest['Y'] = candidate_sol['Y'][i]
+            dest['Z'] = candidate_sol['Z'][i]
             D = compute_distance(pos, dest)[0]
             if D <= HorizonLength:
                 flag1 = flag1 and (D >= safe_dist)
 
-            x1, y1, z1 = geographic_to_cartesian(FLT_data[u]['latitude'], FLT_data[u]['longitude'])
-            xx1, yy1, zz1 = geographic_to_cartesian(Dist2Horizon['latitude'][o], Dist2Horizon['longitude'][o])
+            x1, y1, z1 = FLT_data[u]['X'], FLT_data[u]['Y'], FLT_data[u]['Z']
+            xx1, yy1, zz1 = Dist2Horizon['X'][o], Dist2Horizon['Y'][o], Dist2Horizon['Z'][o]
 
             pA = np.array(([[x0, y0, z0], [x1, y1, z1]]))
             pB = np.array(([[xx0, yy0, zz0], [xx1, yy1, zz1]]))
             P_intersect = lineXline(pA, pB)
 
             if not(all(np.isinf(P_intersect))):
-                lat, lon, alt = cartesian_to_geographic(P_intersect[0], P_intersect[1], P_intersect[2])
+                x_int, y_int, z_int = P_intersect[0], P_intersect[1], P_intersect[2]
 
                 pos = dict()
-                pos['latitude'] = FLT_data[Uidx]['latitude']
-                pos['longitude'] = FLT_data[Uidx]['longitude']
-                pos['altitude'] = FLT_data[Uidx]['altitude']
+                pos['X'] = FLT_data[Uidx]['X']
+                pos['Y'] = FLT_data[Uidx]['Y']
+                pos['Z'] = FLT_data[Uidx]['Z']
                 dest = dict()
-                dest['latitude'] = lat
-                dest['longitude'] = lon
-                dest['altitude'] = Dist2Horizon['altitude'][o]  # TO BE CHECKED (SHOULD BE: alt)
+                dest['X'] = x_int
+                dest['Y'] = y_int
+                dest['Z'] = z_int
                 D0 = compute_distance(pos, dest)[0]
 
-                pos['latitude'] = candidate_sol['latitude'][i]
-                pos['longitude'] = candidate_sol['longitude'][i]
-                pos['altitude'] = candidate_sol['altitude'][i]
-                dest['latitude'] = lat
-                dest['longitude'] = lon
-                dest['altitude'] = Dist2Horizon['altitude'][o]  # TO BE CHECKED (SHOULD BE: alt)
+                pos['X'] = candidate_sol['X'][i]
+                pos['Y'] = candidate_sol['Y'][i]
+                pos['Z'] = candidate_sol['Z'][i]
+                dest['X'] = x_int
+                dest['Y'] = y_int
+                dest['Z'] = z_int
                 D1 = compute_distance(pos, dest)[0]
 
-                pos['latitude'] = FLT_data[u]['latitude']
-                pos['longitude'] = FLT_data[u]['longitude']
-                pos['altitude'] = FLT_data[u]['altitude']
-                dest['latitude'] = lat
-                dest['longitude'] = lon
-                dest['altitude'] = Dist2Horizon['altitude'][o]  # TO BE CHECKED (SHOULD BE: alt)
+                pos['X'] = FLT_data[u]['X']
+                pos['Y'] = FLT_data[u]['Y']
+                pos['Z'] = FLT_data[u]['Z']
+                dest['X'] = x_int
+                dest['Y'] = y_int
+                dest['Z'] = z_int
                 D2 = compute_distance(pos, dest)[0]
 
                 t1 = Tsim_current + (D1 / candidate_sol['airspeed'][i])
@@ -340,19 +338,19 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
 
     for i in range(len(H)*len(V)):
         pos = dict()
-        pos['latitude'] = candidate_sol['latitude'][i]
-        pos['longitude'] = candidate_sol['longitude'][i]
-        pos['altitude'] = candidate_sol['altitude'][i]
+        pos['X'] = candidate_sol['X'][i]
+        pos['Y'] = candidate_sol['Y'][i]
+        pos['Z'] = candidate_sol['Z'][i]
         dest = dict()
-        dest['latitude'] = GOAL_WPs['latitude'][current_wp_idx]  
-        dest['longitude'] = GOAL_WPs['longitude'][current_wp_idx]  
-        dest['altitude'] = GOAL_WPs['altitude'][current_wp_idx]
+        dest['X'] = GOAL_WPs['X'][current_wp_idx]  
+        dest['Y'] = GOAL_WPs['Y'][current_wp_idx]  
+        dest['Z'] = GOAL_WPs['Z'][current_wp_idx]
         D0 = compute_distance(pos, dest)[0]
 
         C_safety.append(-float(VO_flag[i] and PO_flag[i]))
         C_distance.append(D0)
         C_energy.append((FLT_data[Uidx]['battery_capacity'] - candidate_sol['battery_capacity'][i]) / FLT_data[Uidx]['battery_capacity'])
-        C_sink.append((FLT_data[Uidx]['altitude'] - candidate_sol['altitude'][i]) / FLT_data[Uidx]['altitude'])
+        C_sink.append((FLT_data[Uidx]['Z'] - candidate_sol['Z'][i]) / FLT_data[Uidx]['Z'])
 
     C_safety = np.array(C_safety)
     norm_C_safety = np.divide(C_safety, np.linalg.norm(C_safety))
@@ -367,14 +365,14 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
 
     idx = find_min_index((norm_C_safety + norm_C_distance + norm_C_energy + norm_C_sink).tolist())
 
-    FLT_track[Uidx]['latitude'].append(candidate_sol['latitude'][idx])
-    FLT_track[Uidx]['longitude'].append(candidate_sol['longitude'][idx])
-    FLT_track[Uidx]['altitude'].append(candidate_sol['altitude'][idx])
+    FLT_track[Uidx]['X'].append(candidate_sol['X'][idx])
+    FLT_track[Uidx]['Y'].append(candidate_sol['Y'][idx])
+    FLT_track[Uidx]['Z'].append(candidate_sol['Z'][idx])
     FLT_track[Uidx]['bearing'].append(candidate_sol['bearing'][idx])
 
-    if FLT_track[Uidx]['altitude'][-1] <= LBz:
+    if FLT_track[Uidx]['Z'][-1] <= LBz:
         FLT_track[Uidx]['flight_mode'].append('engine')
-    elif FLT_track[Uidx]['altitude'][-1] >= UBz:
+    elif FLT_track[Uidx]['Z'][-1] >= UBz:
         FLT_track[Uidx]['flight_mode'].append('glide')
     else:
         FLT_track[Uidx]['flight_mode'].append(candidate_sol['flight_mode'][idx])
@@ -392,7 +390,7 @@ def gotoWaypointMulti(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, params, UAV_da
     Args:
         FLT_track (dict): Historique des positions et états des UAVs.
         FLT_conditions (dict): Conditions de vol actuelles des UAVs.
-        GOAL_WPs (dict): Dictionnaire {Uidx: [ {'latitude', 'longitude', 'altitude'}] } pour chaque UAV.
+        GOAL_WPs (dict): Dictionnaire {Uidx: [ {'X', 'Y', 'Z'}] } pour chaque UAV.
         nUAVs (int): Nombre total de UAVs.
         params (dict): Paramètres de simulation.
         UAV_data (dict): Paramètres physiques du UAV (identiques pour tous ou par UAV).

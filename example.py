@@ -100,14 +100,12 @@ for u in range(nUAVs):
     FLT_track[u]['flight_time'].append(0.0)
     FLT_track[u]['flight_mode'].append('glide')
 
-
-# use trajectory from generator
-evaluator = TrajectoryEvaluator(params, UAV_data, FLT_conditions[u])
-for u in range(nUAVs):
+    evaluator = TrajectoryEvaluator(params, UAV_data, FLT_conditions[u])
     startPoint = dict()
     startPoint['X'] = FLT_track[u]['X'][-1]
     startPoint['Y'] = FLT_track[u]['Y'][-1]
     startPoint['Z'] = FLT_track[u]['Z'][-1]
+    startPoint['bearing'] = FLT_track[u]['bearing'][-1]
     trajectoires = generate_all_trajectories(startPoint,END_WPs[u], params, UAV_data)
     optimal_trajectoires = evaluator.evaluate_trajectories(trajectoires)
     GOAL_WPs[u]['X'] = optimal_trajectoires['X']
