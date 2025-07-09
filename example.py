@@ -115,12 +115,13 @@ for u in range(nUAVs):
 
 current_wp_indices = dict()
 for u in range(nUAVs):
-    current_wp_indices[u] = 0  # Initialize the current waypoint index for each UAV 
+    current_wp_indices[u] = 1  # Initialize the current waypoint index for each UAV 
 
 print(f'Fin: {GOAL_WPs[0]}')
 print(f'Début: {startPoint}')
-D2 = compute_distance_cartesian(startPoint, GOAL_WPs[0])
+D2 = compute_distance_cartesian(startPoint, GOAL_WPs[0])[-1]
 print(f'distance: {D2}')
+
 while True:
     # Check if all UAVs have reached their goal waypoints
     if all(current_wp_indices[u] >= len(GOAL_WPs[u]['X']) for u in range(nUAVs)):
@@ -128,7 +129,7 @@ while True:
 
     # Call the gotoWaypointMulti function to update the flight track and conditions
     FLT_track, FLT_conditions, current_wp_indices = gotoWaypointMulti(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, params, UAV_data, current_wp_indices)
-    print(FLT_conditions[0]['airspeed'])
+    #print(FLT_conditions[0]['airspeed'])
     #print(FLT_track[0]['X'])
     #print(FLT_track[0]['Y'])
     #print(FLT_track[0]['Z'])
