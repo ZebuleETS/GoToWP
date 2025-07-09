@@ -55,7 +55,7 @@ class StraightLineTrajectory(TrajectoryGenerator):
         Returns:
             dict: Points de trajectoire {X: [], Y: [], Z: []}
         """
-        num_points = self.params.get('num_points', 50)
+        num_points = 50
         end_point = extract_waypoint(end_point)
         
         # Génération des points intermédiaires en ligne droite
@@ -77,39 +77,140 @@ class CircularTrajectory(TrajectoryGenerator):
 
     def generate_path(self, start_point, end_point) -> Dict:
         """
-        Génère une trajectoire circulaire entre deux points cartésiens
+        Génère une trajectoire circulaire (arc) entre deux points cartésiens
+        en optimisant le rayon pour minimiser la distance parcourue
+        
         Args:
             start_point (dict): Point de départ {X, Y, Z}
             end_point (dict): Point d'arrivée {X, Y, Z}
         Returns:
             dict: Points de trajectoire {X: [], Y: [], Z: []}
         """
-        num_points = self.params.get('num_points', 50)
-        radius = self.params.get('radius', 100)  # rayon en mètres
+        num_points = 75
+        base_radius = 100  # rayon initial en mètres
         end_point = extract_waypoint(end_point)
         
-        # Calcul du centre du cercle (milieu)
-        center_x = (start_point['X'] + end_point['X']) / 2
-        center_y = (start_point['Y'] + end_point['Y']) / 2
-        center_z = (start_point['Z'] + end_point['Z']) / 2
+        # Calculer la distance directe entre les deux points
+        dx = end_point['X'] - start_point['X']
+        dy = end_point['Y'] - start_point['Y']
+        chord_length = np.sqrt(dx**2 + dy**2)
         
-        # Génération des points sur un arc de cercle
-        # Angle de départ et d'arrivée
+        # Rayon minimum nécessaire (moitié de la distance directe)
+        min_radius = chord_length / 2
+        
+        # Si UAV_data est disponible, prendre en compte le rayon de virage minimum
+        min_turn_radius = None
+        if self.UAV_data:
+            min_velocity = self.UAV_data.get('min_airspeed', 8.0)
+            max_velocity = self.UAV_data.get('max_airspeed', 30.0)
+            max_turn_rate = self.UAV_data.get('max_turn_rate', 0.7)
+            avg_velocity = (min_velocity + max_velocity) / 2
+            min_turn_radius = avg_velocity / max_turn_rate
+            
+            # Assurer que le rayon minimum est respecté
+            min_radius = max(min_radius, min_turn_radius)
+        
+        # Définir une plage de rayons à tester
+        max_test_radius = max(base_radius * 3, min_radius * 4)  # Limiter l'exploration
+        
+        # Recherche du rayon optimal
+        optimal_radius = self._find_optimal_radius(start_point, end_point, min_radius, max_test_radius)
+        
+        # Générer la trajectoire avec le rayon optimal
+        return self._generate_circular_arc(start_point, end_point, optimal_radius, num_points)
+    
+    
+    def _find_optimal_radius(self, start_point, end_point, min_radius, max_radius, num_samples=10):
+        """
+        Trouve le rayon optimal qui minimise la longueur de l'arc entre deux points
+        
+        Args:
+            start_point (dict): Point de départ {X, Y, Z}
+            end_point (dict): Point d'arrivée {X, Y, Z}
+            min_radius (float): Rayon minimum à tester
+            max_radius (float): Rayon maximum à tester
+            num_samples (int): Nombre d'échantillons de rayon à tester
+            
+        Returns:
+            float: Rayon optimal
+        """
+        # Distance directe entre les points
+        dx = end_point['X'] - start_point['X']
+        dy = end_point['Y'] - start_point['Y']
+        chord_length = np.sqrt(dx**2 + dy**2)
+        
+        # Tester différents rayons et calculer la longueur de l'arc
+        radii = np.linspace(min_radius, max_radius, num_samples)
+        arc_lengths = []
+        
+        for radius in radii:
+            # Calculer la longueur de l'arc pour ce rayon
+            # Pour un arc de cercle, angle = 2 * arcsin(chord / (2 * radius))
+            # Longueur d'arc = rayon * angle
+            angle = 2 * np.arcsin(chord_length / (2 * radius))
+            arc_length = radius * angle
+            arc_lengths.append(arc_length)
+        
+        # Trouver le rayon qui donne la longueur d'arc minimale
+        min_index = np.argmin(arc_lengths)
+        optimal_radius = radii[min_index]
+        
+        print(f"Rayon optimal trouvé: {optimal_radius:.2f} m (longueur d'arc: {arc_lengths[min_index]:.2f} m)")
+        
+        return optimal_radius
+    
+    
+    def _generate_circular_arc(self, start_point, end_point, radius, num_points):
+        """
+        Génère un arc de cercle entre deux points avec le rayon spécifié
+        
+        Args:
+            start_point (dict): Point de départ {X, Y, Z}
+            end_point (dict): Point d'arrivée {X, Y, Z}
+            radius (float): Rayon du cercle
+            num_points (int): Nombre de points à générer
+            
+        Returns:
+            dict: Points de trajectoire {X: [], Y: [], Z: []}
+        """
+        # Calculer la distance directe entre les deux points
+        dx = end_point['X'] - start_point['X']
+        dy = end_point['Y'] - start_point['Y']
+        chord_length = np.sqrt(dx**2 + dy**2)
+        
+        # Calculer la hauteur du segment circulaire (sagitta)
+        sagitta = radius - np.sqrt(radius**2 - (chord_length/2)**2)
+        
+        # Direction perpendiculaire à la ligne droite entre les points
+        perpendicular_x = -dy / chord_length
+        perpendicular_y = dx / chord_length
+        
+        # Calculer le centre du cercle
+        mid_x = (start_point['X'] + end_point['X']) / 2
+        mid_y = (start_point['Y'] + end_point['Y']) / 2
+        
+        # Positionner le centre du cercle perpendiculairement à la ligne directe
+        # Pour un arc minimal, on place le centre sur la médiatrice
+        center_x = mid_x + perpendicular_x * (radius - sagitta)
+        center_y = mid_y + perpendicular_y * (radius - sagitta)
+        
+        # Calculer les angles de départ et d'arrivée par rapport au centre
         start_angle = np.arctan2(start_point['Y'] - center_y, start_point['X'] - center_x)
         end_angle = np.arctan2(end_point['Y'] - center_y, end_point['X'] - center_x)
         
-        # Assurer que nous prenons le chemin le plus court
-        if abs(end_angle - start_angle) > pi:
+        # Assurer que nous prenons le bon arc (le plus court)
+        if abs(end_angle - start_angle) > np.pi:
             if end_angle > start_angle:
-                start_angle += 2 * pi
+                start_angle += 2 * np.pi
             else:
-                end_angle += 2 * pi
+                end_angle += 2 * np.pi
         
+        # Générer des points uniformément répartis sur l'arc
         angles = np.linspace(start_angle, end_angle, num_points)
-        distance_from_center = np.sqrt((start_point['X'] - center_x)**2 + (start_point['Y'] - center_y)**2)
+        x_points = center_x + radius * np.cos(angles)
+        y_points = center_y + radius * np.sin(angles)
         
-        x_points = center_x + distance_from_center * np.cos(angles)
-        y_points = center_y + distance_from_center * np.sin(angles)
+        # Interpolation linéaire de l'altitude
         z_points = np.linspace(start_point['Z'], end_point['Z'], num_points)
         
         return {'X': x_points.tolist(), 'Y': y_points.tolist(), 'Z': z_points.tolist()}
@@ -151,7 +252,7 @@ class DubinsPath3D(TrajectoryGenerator):
         Returns:
             dict: Points de trajectoire {X: [], Y: [], Z: []}
         """
-        num_points_total = self.params.get('num_points', 100)
+        num_points_total = 150
         end_point = extract_waypoint(end_point)
         # Calculer le cap initial et final
         bearing_start = 0  # Par défaut, on suppose que le drone pointe vers l'axe X positif
@@ -531,7 +632,7 @@ class PythagoreanHodographPath(TrajectoryGenerator):
         Returns:
             dict: Points de trajectoire {X: [], Y: [], Z: []}
         """
-        num_points = self.params.get('num_points', 100)
+        num_points = 200
         end_point = extract_waypoint(end_point)
         # Conversion en coordonnées cartésiennes pour simplifier les calculs
         start_xyz = np.array([start_point['X'], start_point['Y'], start_point['Z']])
@@ -901,7 +1002,7 @@ class TrajectoryEvaluator:
         
             # Afficher le score de chaque trajectoire pour le débogage
             print(f"Score de la trajectoire {trajectory_type}: {score:.2f}")
-            
+
             if score < min_score:
                 min_score = score
                 best_trajectory = trajectory

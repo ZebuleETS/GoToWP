@@ -4,6 +4,7 @@ import warnings
 from compute import (
     cartesian_to_geographic,
     compute_distance,
+    compute_distance_cartesian,
     geographic_to_cartesian,
     get_current_flight_data,
     get_power_consumption,
@@ -161,7 +162,7 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
     }
     
     # Check if we've reached the current waypoint
-    distance_to_wp = compute_distance(current_pos, target_wp)[0]
+    distance_to_wp = compute_distance_cartesian(current_pos, target_wp)[0]
     next_step_distance = FLT_conditions[Uidx]['airspeed'] * params['time_step']
     if distance_to_wp < params.get('waypoint_threshold', 10.0) or next_step_distance >= distance_to_wp:
         current_wp_idx += 1
@@ -282,7 +283,7 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
             dest['X'] = candidate_sol['X'][i]
             dest['Y'] = candidate_sol['Y'][i]
             dest['Z'] = candidate_sol['Z'][i]
-            D = compute_distance(pos, dest)[0]
+            D = compute_distance_cartesian(pos, dest)[0]
             if D <= HorizonLength:
                 flag1 = flag1 and (D >= safe_dist)
 
@@ -304,7 +305,7 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
                 dest['X'] = x_int
                 dest['Y'] = y_int
                 dest['Z'] = z_int
-                D0 = compute_distance(pos, dest)[0]
+                D0 = compute_distance_cartesian(pos, dest)[0]
 
                 pos['X'] = candidate_sol['X'][i]
                 pos['Y'] = candidate_sol['Y'][i]
@@ -312,7 +313,7 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
                 dest['X'] = x_int
                 dest['Y'] = y_int
                 dest['Z'] = z_int
-                D1 = compute_distance(pos, dest)[0]
+                D1 = compute_distance_cartesian(pos, dest)[0]
 
                 pos['X'] = FLT_data[u]['X']
                 pos['Y'] = FLT_data[u]['Y']
@@ -320,7 +321,7 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
                 dest['X'] = x_int
                 dest['Y'] = y_int
                 dest['Z'] = z_int
-                D2 = compute_distance(pos, dest)[0]
+                D2 = compute_distance_cartesian(pos, dest)[0]
 
                 t1 = Tsim_current + (D1 / candidate_sol['airspeed'][i])
                 t2 = Tsim_current + (D2 / FLT_data[u]['airspeed'])
@@ -345,7 +346,7 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
         dest['X'] = GOAL_WPs['X'][current_wp_idx]  
         dest['Y'] = GOAL_WPs['Y'][current_wp_idx]  
         dest['Z'] = GOAL_WPs['Z'][current_wp_idx]
-        D0 = compute_distance(pos, dest)[0]
+        D0 = compute_distance_cartesian(pos, dest)[0]
 
         C_safety.append(-float(VO_flag[i] and PO_flag[i]))
         C_distance.append(D0)
