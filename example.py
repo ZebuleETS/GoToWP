@@ -3,11 +3,11 @@
 from math import pi
 import numpy as np
 from GoToWP import gotoWaypointMulti
-from compute import compute_distance, get_destination_from_range_and_bearing
+from compute import compute_distance, compute_distance_cartesian, get_destination_from_range_and_bearing
 from trajectory import TrajectoryEvaluator, generate_all_trajectories
 
 
-nUAVs = 1
+nUAVs = 2
 
 UAV_data = dict()
 UAV_data['maximum_battery_capacity'] = 10.0
@@ -39,12 +39,12 @@ lbLON = np.copy(lon).tolist()
 
 params = dict()
 params['working_floor'] = 600.0
-params['latitude_lower_bound'] = lbLAT
-params['latitude_upper_bound'] = ubLAT
-params['longitude_lower_bound'] = lbLON
-params['longitude_upper_bound'] = ubLON
-params['altitude_lower_bound'] = 200.0
-params['altitude_upper_bound'] = 1000.0
+params['X_lower_bound'] = 0.0
+params['X_upper_bound'] = 6000.0
+params['Y_lower_bound'] = 0.0
+params['Y_upper_bound'] = 6000.0
+params['Z_lower_bound'] = 200.0
+params['Z_upper_bound'] = 1000.0
 params['current_simulation_time'] = 0.0
 params['time_step'] = 1
 params['bearing_step'] = 10
@@ -64,10 +64,10 @@ T_fin = T_SEA_LEVEL + TROPO_LAPSE_RATE * (params['working_floor'])
 air_density = RHO_SEA_LEVEL * (T_fin / T_SEA_LEVEL)**(-grav_accel / (TROPO_LAPSE_RATE * R) - 1)
 
 FLT_track = {k: {} for k in range(nUAVs)}
-FLT_track_keys = ['latitude', 'longitude', 'altitude', 'bearing', 'battery_capacity', 'flight_time', 'flight_mode']
+FLT_track_keys = ['X', 'Y', 'Z', 'bearing', 'battery_capacity', 'flight_time', 'flight_mode']
 FLT_conditions = {k: {} for k in range(nUAVs)}
 END_WPs = {k: {} for k in range(nUAVs)}
-WPs_keys = ['latitude', 'longitude', 'altitude']
+WPs_keys = ['X', 'Y', 'Z']
 GOAL_WPs = {k: {} for k in range(nUAVs)}
 
 for u in range(nUAVs):
@@ -88,62 +88,49 @@ for u in range(nUAVs):
     FLT_conditions[u]['air_density'] = air_density
     FLT_conditions[u]['battery_capacity'] = UAV_data['maximum_battery_capacity']
 
-    END_WPs[u]['latitude'].append(np.random.uniform(params['latitude_lower_bound'], params['latitude_upper_bound'], 1)[0].tolist())
-    END_WPs[u]['longitude'].append(np.random.uniform(params['longitude_lower_bound'], params['longitude_upper_bound'], 1)[0].tolist())
-    END_WPs[u]['altitude'].append(400.0)
-    
-    FLT_track[u]['latitude'].append(np.random.uniform(params['latitude_lower_bound'], params['latitude_upper_bound'], 1)[0].tolist())
-    FLT_track[u]['longitude'].append(np.random.uniform(params['longitude_lower_bound'], params['longitude_upper_bound'], 1)[0].tolist())
-    FLT_track[u]['altitude'].append(400.0)
+    END_WPs[u]['X'].append(np.random.uniform(params['X_lower_bound'], params['X_upper_bound'], 1)[0].tolist())
+    END_WPs[u]['Y'].append(np.random.uniform(params['Y_lower_bound'], params['Y_upper_bound'], 1)[0].tolist())
+    END_WPs[u]['Z'].append(400.0)
+
+    FLT_track[u]['X'].append(np.random.uniform(params['X_lower_bound'], params['X_upper_bound'], 1)[0].tolist())
+    FLT_track[u]['Y'].append(np.random.uniform(params['Y_lower_bound'], params['Y_upper_bound'], 1)[0].tolist())
+    FLT_track[u]['Z'].append(400.0)
     FLT_track[u]['bearing'].append(0.0)
     FLT_track[u]['battery_capacity'].append(UAV_data['maximum_battery_capacity'])
     FLT_track[u]['flight_time'].append(0.0)
     FLT_track[u]['flight_mode'].append('glide')
 
-
-# use trajectory from generator
-evaluator = TrajectoryEvaluator(params, UAV_data, FLT_conditions[u])
-for u in range(nUAVs):
+    evaluator = TrajectoryEvaluator(params, UAV_data, FLT_conditions[u])
     startPoint = dict()
-    startPoint['latitude'] = FLT_track[u]['latitude'][-1]
-    startPoint['longitude'] = FLT_track[u]['longitude'][-1]
-    startPoint['altitude'] = FLT_track[u]['altitude'][-1]
+    startPoint['X'] = FLT_track[u]['X'][-1]
+    startPoint['Y'] = FLT_track[u]['Y'][-1]
+    startPoint['Z'] = FLT_track[u]['Z'][-1]
+    startPoint['bearing'] = FLT_track[u]['bearing'][-1]
     trajectoires = generate_all_trajectories(startPoint,END_WPs[u], params, UAV_data)
     optimal_trajectoires = evaluator.evaluate_trajectories(trajectoires)
-    GOAL_WPs[u]['latitude'] = optimal_trajectoires['latitude']
-    GOAL_WPs[u]['longitude'] = optimal_trajectoires['longitude']
-    GOAL_WPs[u]['altitude'] = optimal_trajectoires['altitude']
-    
-    
+    GOAL_WPs[u]['X'] = optimal_trajectoires['X']
+    GOAL_WPs[u]['Y'] = optimal_trajectoires['Y']
+    GOAL_WPs[u]['Z'] = optimal_trajectoires['Z']
+
+
 current_wp_indices = dict()
 for u in range(nUAVs):
-    current_wp_indices[u] = 0  # Initialize the current waypoint index for each UAV 
+    current_wp_indices[u] = 1  # Initialize the current waypoint index for each UAV 
 
-#print(f'Fin: {GOAL_WPs[0]}')
-#print(f'Début: {startPoint}')
-#D2 = compute_distance(startPoint, GOAL_WPs[0])
-#print(f'distance: {D2}')
-last_pos = {
-        'latitude': FLT_track[0]['latitude'][-1],
-        'longitude': FLT_track[0]['longitude'][-1],
-        'altitude': FLT_track[0]['altitude'][-1]
-    }
+print(f'Fin: {GOAL_WPs[0]}')
+print(f'Début: {startPoint}')
+D2 = compute_distance_cartesian(startPoint, GOAL_WPs[0])[-1]
+print(f'distance: {D2}')
+
 while True:
     # Check if all UAVs have reached their goal waypoints
-    if all(current_wp_indices[u] >= len(GOAL_WPs[u]['latitude']) for u in range(nUAVs)):
+    if all(current_wp_indices[u] >= len(GOAL_WPs[u]['X']) for u in range(nUAVs)):
         break
 
     # Call the gotoWaypointMulti function to update the flight track and conditions
     FLT_track, FLT_conditions, current_wp_indices = gotoWaypointMulti(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, params, UAV_data, current_wp_indices)
     #print(FLT_conditions[0]['airspeed'])
-    #current_pos = {
-    #    'latitude': FLT_track[0]['latitude'][-1],
-    #    'longitude': FLT_track[0]['longitude'][-1],
-    #    'altitude': FLT_track[0]['altitude'][-1]
-    #}
-    #D = compute_distance(last_pos, current_pos)
-    #print(D)
-    print(FLT_track[0]['latitude'])
-    print(FLT_track[0]['longitude'])
-    print(FLT_track[0]['altitude'])
-    print(current_wp_indices)
+    #print(FLT_track[0]['X'])
+    #print(FLT_track[0]['Y'])
+    #print(FLT_track[0]['Z'])
+    #print(current_wp_indices)
