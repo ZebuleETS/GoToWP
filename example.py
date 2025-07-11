@@ -7,7 +7,7 @@ from compute import compute_distance, compute_distance_cartesian, get_destinatio
 from trajectory import TrajectoryEvaluator, generate_all_trajectories
 
 
-nUAVs = 1
+nUAVs = 2
 
 UAV_data = dict()
 UAV_data['maximum_battery_capacity'] = 10.0

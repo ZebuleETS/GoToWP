@@ -55,7 +55,7 @@ class StraightLineTrajectory(TrajectoryGenerator):
         Returns:
             dict: Points de trajectoire {X: [], Y: [], Z: []}
         """
-        num_points = 50
+        num_points = self.params.get('num_points', 200)
         end_point = extract_waypoint(end_point)
         
         # Génération des points intermédiaires en ligne droite
@@ -86,7 +86,7 @@ class CircularTrajectory(TrajectoryGenerator):
         Returns:
             dict: Points de trajectoire {X: [], Y: [], Z: []}
         """
-        num_points = 75
+        num_points = self.params.get('num_points', 200)
         base_radius = 100  # rayon initial en mètres
         end_point = extract_waypoint(end_point)
         
@@ -252,7 +252,7 @@ class DubinsPath3D(TrajectoryGenerator):
         Returns:
             dict: Points de trajectoire {X: [], Y: [], Z: []}
         """
-        num_points_total = 150
+        num_points = self.params.get('num_points', 200)
         end_point = extract_waypoint(end_point)
         # Calculer le cap initial et final
         bearing_start = 0  # Par défaut, on suppose que le drone pointe vers l'axe X positif
@@ -268,14 +268,14 @@ class DubinsPath3D(TrajectoryGenerator):
         
         for config in self.dubins_configs:
             path, length = self._compute_dubins_path(start_point, end_point, bearing_start, 
-                                               bearing_end, config, num_points_total)
+                                               bearing_end, config, num_points)
             if path is not None and length < min_length:
                 min_length = length
                 best_path = path
         
         if best_path is None:
             # Fallback: générer une ligne droite si aucun chemin n'est valide
-            straight_points = num_points_total
+            straight_points = num_points
             straight_path = self._generate_straight_segment(start_point, end_point, straight_points)
             
             x_points = straight_path['path']['X']
@@ -632,7 +632,7 @@ class PythagoreanHodographPath(TrajectoryGenerator):
         Returns:
             dict: Points de trajectoire {X: [], Y: [], Z: []}
         """
-        num_points = 200
+        num_points = self.params.get('num_points', 200)
         end_point = extract_waypoint(end_point)
         # Conversion en coordonnées cartésiennes pour simplifier les calculs
         start_xyz = np.array([start_point['X'], start_point['Y'], start_point['Z']])
