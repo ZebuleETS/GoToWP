@@ -24,18 +24,23 @@ UAV_data['max_airspeed'] = 30.0
 UAV_data['min_airspeed'] = 8.0
 UAV_data['max_turn_rate'] = 0.7
 
-hub = dict()
-hub['latitude'] = np.deg2rad(52.109601).tolist()
-hub['longitude'] = np.deg2rad(-106.389644).tolist()
-R = 3000.0
-lat, lon = get_destination_from_range_and_bearing(hub, R, 0)
-ubLAT = np.copy(lat).tolist()
-lat, lon = get_destination_from_range_and_bearing(hub, R, pi)
-lbLAT = np.copy(lat).tolist()
-lat, lon = get_destination_from_range_and_bearing(hub, R, pi/2)
-ubLON = np.copy(lon).tolist()
-lat, lon = get_destination_from_range_and_bearing(hub, R, 3*pi/2)
-lbLON = np.copy(lon).tolist()
+# Définition des obstacles (cylindres)
+obstacles = [
+    {
+        'x': 1000,        # Position X du centre (m)
+        'y': 1500,        # Position Y du centre (m)
+        'radius': 200,    # Rayon du cylindre (m)
+        'z_min': 0,     # Altitude minimale de l'obstacle (m)
+        'z_max': 800      # Altitude maximale de l'obstacle (m)
+    },
+    {
+        'x': 3000,
+        'y': 2000,
+        'radius': 350,
+        'z_min': 0,
+        'z_max': 500
+    }
+]
 
 params = dict()
 params['working_floor'] = 600.0

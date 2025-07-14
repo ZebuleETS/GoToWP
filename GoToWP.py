@@ -2,6 +2,7 @@ from math import cos, sin, pi, sqrt, atan, atan2
 import numpy as np
 import warnings
 from compute import (
+    calculate_optimal_climb_angle,
     cartesian_to_geographic,
     compute_distance,
     compute_distance_cartesian,
@@ -214,34 +215,116 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
                 PB_temp['Z'].append(LBz)
 
     elif FLT_data[Uidx]['flight_mode'] == 'engine':
+        # Trois possibilités avec le moteur: monter, voler à niveau constant, descendre de manière contrôlée
+        
+        # Définir les angles de trajectoire pour chaque mode
+        climb_angle = calculate_optimal_climb_angle(UAV_data, FLT_conditions[Uidx])
+        level_angle = 0
+        descent_angle = np.deg2rad(-5)
+
+        # Pour chaque cap possible
         for i in range(len(H)):
             for j in range(len(V)):
                 FLT_conditions[Uidx]['airspeed'] = V[j]
                 FLT_conditions[Uidx]['airspeed_dot'] = 0.0
-                dZ = V[j] * t_step
-                pridction_distance = (abs(UBz - FLT_data[Uidx]['Z'])/dZ)*V[j] if dZ != 0 else V[j] * t_step
-                pwr = get_power_consumption(UAV_data, FLT_conditions[Uidx])
-                power_consumption = pwr * (t_step / 3600)
-
+                
+                # 1. MONTÉE AVEC MOTEUR
+                FLT_conditions[Uidx]['flight_path_angle'] = climb_angle
+                
+                # Calculer la distance parcourue et le changement d'altitude
+                horizontal_distance = V[j] * t_step * np.cos(climb_angle)
+                altitude_change = V[j] * t_step * np.sin(climb_angle)
+                
+                # Calculer la consommation d'énergie pour la montée
+                pwr_climb = get_power_consumption(UAV_data, FLT_conditions[Uidx])
+                power_consumption_climb = pwr_climb * (t_step / 3600)
+                
+                # Calculer la nouvelle position
                 REF = dict()
                 REF['X'] = FLT_data[Uidx]['X']
                 REF['Y'] = FLT_data[Uidx]['Y']
-                x_new, y_new = get_destination_from_range_and_bearing_cartesian(REF, dZ, H[i])
-                alt = min(max(FLT_data[Uidx]['Z']+dZ, LBz), UBz)
-
-                candidate_sol['X'].append(x_new)
-                candidate_sol['Y'].append(y_new)
-                candidate_sol['Z'].append(alt)
+                x_new_climb, y_new_climb = get_destination_from_range_and_bearing_cartesian(REF, horizontal_distance, H[i])
+                alt_climb = min(max(FLT_data[Uidx]['Z'] + altitude_change, LBz), UBz)
+                
+                # Ajouter le candidat pour la montée
+                candidate_sol['X'].append(x_new_climb)
+                candidate_sol['Y'].append(y_new_climb)
+                candidate_sol['Z'].append(alt_climb)
                 candidate_sol['bearing'].append(H[i])
-                candidate_sol['battery_capacity'].append(FLT_data[Uidx]['battery_capacity']-power_consumption)
+                candidate_sol['battery_capacity'].append(FLT_data[Uidx]['battery_capacity'] - power_consumption_climb)
                 candidate_sol['flight_mode'].append('engine')
                 candidate_sol['airspeed'].append(V[j])
-                candidate_sol['flight_path_angle'].append(0.0)
-
-                x_pred, y_pred = get_destination_from_range_and_bearing_cartesian(REF, pridction_distance, H[i])
-                PB_temp['X'].append(x_pred)
-                PB_temp['Y'].append(y_pred)
+                candidate_sol['flight_path_angle'].append(climb_angle)
+                
+                # Prédiction pour collision
+                pridction_distance = (abs(UBz - FLT_data[Uidx]['Z']) / altitude_change) * horizontal_distance if abs(altitude_change) > 1e-6 else V[j] * t_step
+                x_pred_climb, y_pred_climb = get_destination_from_range_and_bearing_cartesian(REF, pridction_distance, H[i])
+                PB_temp['X'].append(x_pred_climb)
+                PB_temp['Y'].append(y_pred_climb)
                 PB_temp['Z'].append(UBz)
+                
+                # 2. VOL À NIVEAU CONSTANT AVEC MOTEUR
+                FLT_conditions[Uidx]['flight_path_angle'] = level_angle
+                
+                # Distance parcourue horizontalement (égale à la vitesse * temps)
+                horizontal_distance = V[j] * t_step
+                
+                # Calculer la consommation d'énergie pour vol à niveau
+                pwr_level = get_power_consumption(UAV_data, FLT_conditions[Uidx])
+                power_consumption_level = pwr_level * (t_step / 3600)
+                
+                # Calculer la nouvelle position (altitude inchangée)
+                x_new_level, y_new_level = get_destination_from_range_and_bearing_cartesian(REF, horizontal_distance, H[i])
+                
+                # Ajouter le candidat pour le vol à niveau
+                candidate_sol['X'].append(x_new_level)
+                candidate_sol['Y'].append(y_new_level)
+                candidate_sol['Z'].append(FLT_data[Uidx]['Z'])  # Altitude inchangée
+                candidate_sol['bearing'].append(H[i])
+                candidate_sol['battery_capacity'].append(FLT_data[Uidx]['battery_capacity'] - power_consumption_level)
+                candidate_sol['flight_mode'].append('engine')
+                candidate_sol['airspeed'].append(V[j])
+                candidate_sol['flight_path_angle'].append(level_angle)
+                
+                # Prédiction pour collision (distance horizontale directe vers la destination)
+                target_distance = np.sqrt((GOAL_WPs['X'][current_wp_idx] - FLT_data[Uidx]['X'])**2 + 
+                                         (GOAL_WPs['Y'][current_wp_idx] - FLT_data[Uidx]['Y'])**2)
+                x_pred_level, y_pred_level = get_destination_from_range_and_bearing_cartesian(REF, target_distance, H[i])
+                PB_temp['X'].append(x_pred_level)
+                PB_temp['Y'].append(y_pred_level)
+                PB_temp['Z'].append(FLT_data[Uidx]['Z'])
+                
+                # 3. DESCENTE CONTRÔLÉE AVEC MOTEUR
+                FLT_conditions[Uidx]['flight_path_angle'] = descent_angle
+                
+                # Calculer la distance parcourue et le changement d'altitude
+                horizontal_distance = V[j] * t_step * np.cos(descent_angle)
+                altitude_change = V[j] * t_step * np.sin(descent_angle)  # Négatif car descente
+                
+                # Calculer la consommation d'énergie pour la descente contrôlée
+                pwr_descent = get_power_consumption(UAV_data, FLT_conditions[Uidx])
+                power_consumption_descent = pwr_descent * (t_step / 3600)
+                
+                # Calculer la nouvelle position
+                x_new_descent, y_new_descent = get_destination_from_range_and_bearing_cartesian(REF, horizontal_distance, H[i])
+                alt_descent = min(max(FLT_data[Uidx]['Z'] + altitude_change, LBz), UBz)
+                
+                # Ajouter le candidat pour la descente
+                candidate_sol['X'].append(x_new_descent)
+                candidate_sol['Y'].append(y_new_descent)
+                candidate_sol['Z'].append(alt_descent)
+                candidate_sol['bearing'].append(H[i])
+                candidate_sol['battery_capacity'].append(FLT_data[Uidx]['battery_capacity'] - power_consumption_descent)
+                candidate_sol['flight_mode'].append('engine')
+                candidate_sol['airspeed'].append(V[j])
+                candidate_sol['flight_path_angle'].append(descent_angle)
+                
+                # Prédiction pour collision
+                pridction_distance = (abs(FLT_data[Uidx]['Z'] - LBz) / abs(altitude_change)) * horizontal_distance if abs(altitude_change) > 1e-6 else V[j] * t_step
+                x_pred_descent, y_pred_descent = get_destination_from_range_and_bearing_cartesian(REF, pridction_distance, H[i])
+                PB_temp['X'].append(x_pred_descent)
+                PB_temp['Y'].append(y_pred_descent)
+                PB_temp['Z'].append(LBz)
     
     # Check for obstacles and compute safety constraints
     Dist2Horizon = dict()
