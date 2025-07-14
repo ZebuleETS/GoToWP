@@ -524,3 +524,55 @@ def get_destination_from_range_and_bearing_cartesian(starting_point, distance, b
     destination_y = y + distance * sin(bearing)
 
     return destination_x, destination_y
+
+
+def calculate_optimal_climb_angle(UAV_data, flight_conditions):
+    """
+    Calcule l'angle de montée optimal pour un drone à voilure fixe.
+    
+    Args:
+        UAV_data (dict): Caractéristiques du drone
+        flight_conditions (dict): Conditions de vol actuelles
+    
+    Returns:
+        float: Angle de montée optimal en radians
+    """
+    
+    # Copier les conditions de vol pour éviter de les modifier
+    test_conditions = flight_conditions.copy()
+    
+    # Conditions pour vol horizontal
+    test_conditions['flight_path_angle'] = 0.0
+    test_conditions['bank_angle'] = 0.0
+    
+    # Calculer la puissance nécessaire pour vol horizontal
+    level_power = get_power_consumption(UAV_data, test_conditions)
+    
+    # Calculer la puissance maximale disponible
+    max_power = UAV_data['max_power_consumption'] * UAV_data['energy_conversion_efficiency']
+    
+    # Puissance excédentaire (différence entre puissance disponible et puissance requise)
+    excess_power = max_power - level_power
+    
+    # Si pas de puissance excédentaire, pas de montée possible
+    if excess_power <= 0:
+        return 0.0
+    
+    # Calculer le poids
+    weight = UAV_data['empty_weight'] * flight_conditions['grav_accel']
+    
+    # Calculer l'angle de montée théorique maximal basé sur la puissance excédentaire
+    velocity = flight_conditions['airspeed']
+    max_climb_angle_theory = np.arcsin(excess_power / (weight * velocity))
+    
+    # Vérifier le ratio portance/traînée comme contrainte additionnelle
+    lift_drag_ratio = get_lift_to_drag(UAV_data, test_conditions)
+    max_aero_angle = np.arctan(1 / lift_drag_ratio)
+    
+    # Prendre le minimum entre l'angle théorique et l'angle aérodynamique maximum
+    calculated_angle = min(max_climb_angle_theory, max_aero_angle)
+    
+    # Limiter à une valeur raisonnable pour un drone à voilure fixe
+    max_allowed_angle = np.deg2rad(15)
+    
+    return min(calculated_angle, max_allowed_angle)
