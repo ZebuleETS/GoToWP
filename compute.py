@@ -576,3 +576,152 @@ def calculate_optimal_climb_angle(UAV_data, flight_conditions):
     max_allowed_angle = np.deg2rad(15)
     
     return min(calculated_angle, max_allowed_angle)
+
+def is_point_in_obstacle(point, obstacle):
+    """
+    Vérifie si un point est à l'intérieur d'un obstacle cylindrique.
+    
+    Args:
+        point (dict): Point à vérifier {X, Y, Z}
+        obstacle (dict): Obstacle cylindrique {x, y, radius, z_min, z_max}
+        
+    Returns:
+        bool: True si le point est dans l'obstacle, False sinon
+    """
+    # Vérifier la distance horizontale par rapport au centre de l'obstacle
+    dx = point['X'] - obstacle['x']
+    dy = point['Y'] - obstacle['y']
+    horizontal_distance = np.sqrt(dx**2 + dy**2)
+    
+    # Vérifier si le point est à l'intérieur du rayon du cylindre
+    if horizontal_distance > obstacle['radius']:
+        return False
+    
+    # Vérifier si le point est entre les altitudes min et max du cylindre
+    if point['Z'] < obstacle['z_min'] or point['Z'] > obstacle['z_max']:
+        return False
+    
+    # Si toutes les conditions sont remplies, le point est dans l'obstacle
+    return True
+
+def check_segment_obstacle_collision(start_point, end_point, obstacle, num_checks=10):
+    """
+    Vérifie si un segment de ligne entre deux points traverse un obstacle.
+    
+    Args:
+        start_point (dict): Point de départ {X, Y, Z}
+        end_point (dict): Point d'arrivée {X, Y, Z}
+        obstacle (dict): Obstacle cylindrique {x, y, radius, z_min, z_max}
+        num_checks (int): Nombre de points intermédiaires à vérifier
+        
+    Returns:
+        bool: True si le segment traverse l'obstacle, False sinon
+    """
+    # Vérifier les points de départ et d'arrivée
+    if is_point_in_obstacle(start_point, obstacle) or is_point_in_obstacle(end_point, obstacle):
+        return True
+    
+    # Générer des points intermédiaires le long du segment et vérifier chacun
+    for i in range(1, num_checks):
+        fraction = i / num_checks
+        intermediate_point = {
+            'X': start_point['X'] + fraction * (end_point['X'] - start_point['X']),
+            'Y': start_point['Y'] + fraction * (end_point['Y'] - start_point['Y']),
+            'Z': start_point['Z'] + fraction * (end_point['Z'] - start_point['Z'])
+        }
+        if is_point_in_obstacle(intermediate_point, obstacle):
+            return True
+    
+    return False
+
+def find_nearest_obstacle_distance(point, obstacles):
+    """
+    Calcule la distance au bord de l'obstacle le plus proche.
+    
+    Args:
+        point (dict): Point à vérifier {X, Y, Z}
+        obstacles (list): Liste des obstacles
+        
+    Returns:
+        float: Distance au bord de l'obstacle le plus proche (négatif si à l'intérieur)
+    """
+    if not obstacles:
+        return float('inf')
+    
+    min_distance = float('inf')
+    
+    for obstacle in obstacles:
+        # Distance horizontale au centre
+        dx = point['X'] - obstacle['x']
+        dy = point['Y'] - obstacle['y']
+        horizontal_distance = np.sqrt(dx**2 + dy**2)
+        
+        # Distance au bord (négative si à l'intérieur)
+        distance_to_edge = horizontal_distance - obstacle['radius']
+        
+        # Vérifier si le point est entre les altitudes min et max
+        if point['Z'] >= obstacle['z_min'] and point['Z'] <= obstacle['z_max']:
+            if distance_to_edge < min_distance:
+                min_distance = distance_to_edge
+    
+    return min_distance
+
+def check_trajectory_obstacles(trajectory, obstacles):
+    """
+    Vérifie si une trajectoire entre en collision avec des obstacles.
+    
+    Args:
+        trajectory (dict): Trajectoire {X: [], Y: [], Z: []}
+        obstacles (list): Liste des obstacles
+        
+    Returns:
+        tuple: (collision_exists, collision_points, min_distance)
+            - collision_exists (bool): True si une collision existe
+            - collision_points (list): Indices des points en collision
+            - min_distance (float): Distance minimale aux obstacles
+    """
+    collision_exists = False
+    collision_points = []
+    min_distance = float('inf')
+    
+    if not obstacles:
+        return False, [], min_distance
+    
+    # Vérifier chaque point de la trajectoire
+    for i in range(len(trajectory['X'])):
+        point = {
+            'X': trajectory['X'][i],
+            'Y': trajectory['Y'][i],
+            'Z': trajectory['Z'][i]
+        }
+        
+        for obstacle in obstacles:
+            if is_point_in_obstacle(point, obstacle):
+                collision_exists = True
+                collision_points.append(i)
+                break
+                
+        # Calculer la distance minimale aux obstacles
+        distance = find_nearest_obstacle_distance(point, obstacles)
+        min_distance = min(min_distance, distance)
+    
+    # Vérifier également les segments entre les points
+    for i in range(len(trajectory['X']) - 1):
+        start_point = {
+            'X': trajectory['X'][i],
+            'Y': trajectory['Y'][i],
+            'Z': trajectory['Z'][i]
+        }
+        end_point = {
+            'X': trajectory['X'][i + 1],
+            'Y': trajectory['Y'][i + 1],
+            'Z': trajectory['Z'][i + 1]
+        }
+        
+        for obstacle in obstacles:
+            if check_segment_obstacle_collision(start_point, end_point, obstacle):
+                collision_exists = True
+                collision_points.append(i)
+                break
+    
+    return collision_exists, collision_points, min_distance

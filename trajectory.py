@@ -2,6 +2,7 @@ import numpy as np
 from math import pi, asin, cos
 from abc import ABC, abstractmethod
 from compute import (
+    check_trajectory_obstacles,
     compute_bearing,
     compute_bearing_cartesian,
     compute_distance,
@@ -899,10 +900,12 @@ class TrajectoryEvaluator:
         self.max_climb_angle = self._calculate_max_climb_angle()
         self.max_descent_angle = self._calculate_max_descent_angle()
         self.max_bank_angle = self._calculate_max_bank_angle()
+        self.obstacles = params.get('obstacles', [])
         
         # Poids pour le calcul du score
         self.distance_weight = 0.3  # Importance de la distance
         self.energy_weight = 0.7    # Importance de l'énergie
+        self.obstacle_weight = 2.0    # Importance des obstacles
 
     def _calculate_max_climb_angle(self):
         """Calcule l'angle de montée maximum basé sur les caractéristiques du drone"""
@@ -1043,6 +1046,18 @@ class TrajectoryEvaluator:
                 constraints_penalty += 1000 * (self.alt_min - z)
             if z > self.alt_max:
                 constraints_penalty += 1000 * (z - self.alt_max)
+                
+        # Vérifier les obstacles
+        collision_exists, collision_points, min_distance = check_trajectory_obstacles(trajectory, self.obstacles)
+        
+        # Pénalité pour collision avec obstacles
+        if collision_exists:
+            obs_penalty += 50000 * len(collision_points)  # Pénalité très élevée pour les collisions
+        
+        # Pénalité pour proximité d'obstacles
+        safety_margin = 30.0  # marge de sécurité en mètres
+        if min_distance < safety_margin and min_distance > 0:
+            obs_penalty += 5000 * (safety_margin - min_distance) / safety_margin
         
         # Calculer la distance, l'énergie et vérifier les contraintes de virage
         current_flight_conditions = self.flight_conditions.copy()
@@ -1112,6 +1127,7 @@ class TrajectoryEvaluator:
         # Score composite combinant distance, énergie et pénalités de contraintes
         score = (self.distance_weight * total_distance / 1000) + \
                 (self.energy_weight * total_energy / 100) + \
+                (self.obstacle_weight * obs_penalty) + \
                 constraints_penalty
         
         return score

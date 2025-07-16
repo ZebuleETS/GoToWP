@@ -56,7 +56,7 @@ params['bearing_step'] = 10
 params['speed_step'] = 10
 params['safe_distance'] = 30.0
 params['horizon_length'] = 100.0
-
+params['obstacles'] = obstacles
 
 ACC_SEA_LEVEL = 9.80665
 T_SEA_LEVEL = 288.15

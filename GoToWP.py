@@ -1,16 +1,14 @@
-from math import cos, sin, pi, sqrt, atan, atan2
 import numpy as np
 import warnings
 from compute import (
     calculate_optimal_climb_angle,
-    cartesian_to_geographic,
-    compute_distance,
+    check_segment_obstacle_collision,
     compute_distance_cartesian,
-    geographic_to_cartesian,
     get_current_flight_data,
     get_power_consumption,
     get_sink_rate,
-    get_destination_from_range_and_bearing_cartesian
+    get_destination_from_range_and_bearing_cartesian,
+    is_point_in_obstacle
 )
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -120,6 +118,7 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
     # Definition
     VO_flag = list()
     PO_flag = list()
+    OB_flag = list()
     PB_temp = dict()
     PB_temp['X'] = []
     PB_temp['Y'] = []
@@ -149,6 +148,7 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
     safe_dist = params['safe_distance']
     HorizonLength = params['horizon_length']
     ObstacleUAVs = np.concatenate([np.arange(Uidx), np.arange(Uidx+1, nUAVs)]).tolist()
+    obstacles = params.get('obstacles', [])
 
     # Current position and target waypoint
     current_pos = {
@@ -356,6 +356,30 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
         flag1 = True
         flag2 = True
         xx0, yy0, zz0 = PB_temp['X'][i], PB_temp['Y'][i], PB_temp['Z'][i]
+        
+        current_point = {
+            'X': x0,
+            'Y': y0,
+            'Z': z0
+        }
+        
+        candidate_point = {
+            'X': candidate_sol['X'][i],
+            'Y': candidate_sol['Y'][i],
+            'Z': candidate_sol['Z'][i]
+        }
+        
+         # Vérifier les collisions avec les obstacles
+        for obstacle in obstacles:
+            # Vérifier si le point de destination est dans un obstacle
+            if is_point_in_obstacle(candidate_point, obstacle):
+                flag3 = False
+                break
+                
+            # Vérifier si le segment traverse un obstacle
+            if check_segment_obstacle_collision(current_point, candidate_point, obstacle):
+                flag3 = False
+                break
 
         for o in range(len(ObstacleUAVs)):
             u = ObstacleUAVs[o]
@@ -415,12 +439,14 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
 
         VO_flag.append(flag1)
         PO_flag.append(flag2)
+        OB_flag.append(flag3)
 
     C_safety = []
     C_distance = []
     C_energy = []
     C_sink = []
-
+    C_obstacle = []
+    
     for i in range(len(H)*len(V)):
         pos = dict()
         pos['X'] = candidate_sol['X'][i]
@@ -436,7 +462,8 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
         C_distance.append(D0)
         C_energy.append((FLT_data[Uidx]['battery_capacity'] - candidate_sol['battery_capacity'][i]) / FLT_data[Uidx]['battery_capacity'])
         C_sink.append((FLT_data[Uidx]['Z'] - candidate_sol['Z'][i]) / FLT_data[Uidx]['Z'])
-
+        C_obstacle.append(-float(OB_flag[i]))  # -1 si collision avec obstacle, 0 sinon
+        
     C_safety = np.array(C_safety)
     norm_C_safety = np.divide(C_safety, np.linalg.norm(C_safety))
     norm_C_safety[np.isnan(norm_C_safety)] = 0
@@ -447,8 +474,11 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
     norm_C_energy[np.isnan(norm_C_energy)] = 0
     C_sink = np.array(C_sink)
     norm_C_sink = np.divide(C_sink, np.linalg.norm(C_sink))
+    C_obstacle = np.array(C_obstacle)
+    norm_C_obstacle = np.divide(C_obstacle, np.linalg.norm(C_obstacle))
+    norm_C_obstacle[np.isnan(norm_C_obstacle)] = 0
 
-    idx = find_min_index((norm_C_safety + norm_C_distance + norm_C_energy + norm_C_sink).tolist())
+    idx = find_min_index((norm_C_safety + norm_C_distance + norm_C_energy + norm_C_sink + norm_C_obstacle).tolist())
 
     FLT_track[Uidx]['X'].append(candidate_sol['X'][idx])
     FLT_track[Uidx]['Y'].append(candidate_sol['Y'][idx])
