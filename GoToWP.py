@@ -4,6 +4,7 @@ from compute import (
     calculate_optimal_climb_angle,
     check_segment_obstacle_collision,
     compute_distance_cartesian,
+    decision_making,
     get_current_flight_data,
     get_power_consumption,
     get_sink_rate,
@@ -465,21 +466,15 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
         C_obstacle.append(-float(OB_flag[i]))  # -1 si collision avec obstacle, 0 sinon
         
     C_safety = np.array(C_safety)
-    norm_C_safety = np.divide(C_safety, np.linalg.norm(C_safety))
-    norm_C_safety[np.isnan(norm_C_safety)] = 0
     C_distance = np.array(C_distance)
-    norm_C_distance = np.divide(C_distance, np.linalg.norm(C_distance))
     C_energy = np.array(C_energy)
-    norm_C_energy = np.divide(C_energy, np.linalg.norm(C_energy))
-    norm_C_energy[np.isnan(norm_C_energy)] = 0
     C_sink = np.array(C_sink)
-    norm_C_sink = np.divide(C_sink, np.linalg.norm(C_sink))
     C_obstacle = np.array(C_obstacle)
-    norm_C_obstacle = np.divide(C_obstacle, np.linalg.norm(C_obstacle))
-    norm_C_obstacle[np.isnan(norm_C_obstacle)] = 0
 
-    idx = find_min_index((norm_C_safety + norm_C_distance + norm_C_energy + norm_C_sink + norm_C_obstacle).tolist())
-
+    DM = np.column_stack([C_safety, C_distance, C_energy, C_sink, C_obstacle])
+    ranked_indices = decision_making(DM)
+    idx = ranked_indices[0]  # Meilleur candidat selon le classement
+    
     FLT_track[Uidx]['X'].append(candidate_sol['X'][idx])
     FLT_track[Uidx]['Y'].append(candidate_sol['Y'][idx])
     FLT_track[Uidx]['Z'].append(candidate_sol['Z'][idx])

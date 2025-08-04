@@ -725,3 +725,84 @@ def check_trajectory_obstacles(trajectory, obstacles):
                 break
     
     return collision_exists, collision_points, min_distance
+
+def wrapN(x, n):
+    return np.mod(x, n)
+
+def computePolyArea(x,y):
+    A = 0.5*np.abs(np.dot(x,np.roll(y,1))-np.dot(y,np.roll(x,1)))
+    return A
+
+def sum_normalizedMatrixColumns(M):
+    m, n = M.shape
+    s = np.array([0.0] * m)
+    for i in range(n):
+        c = M[:, i]
+        norm_c = np.divide(c, np.linalg.norm(c))
+        norm_c[np.isnan(norm_c)] = 0
+        s += norm_c
+
+    return s
+
+def getDomination(x, y):
+    x = np.array(x)
+    y = np.array(y)
+    return all(x <= y) and any(x < y)
+
+
+def ParetRanking(costs):
+    n = costs.shape[0]
+    is_dominated = np.zeros(n, dtype = int)
+    ranks = np.zeros(n, dtype=int)
+
+    for i in range(n):
+        for j in range(n):
+            if j != i:
+                flag = getDomination(costs[i, :], costs[j, :])
+                is_dominated[i] += int(not flag)
+
+    fronts = np.unique(is_dominated).tolist()
+    for k in range(len(fronts)):
+        ranks[is_dominated == fronts[k]] = k + 1
+
+    return ranks
+
+
+def decision_making(DM):
+    D1 = -np.sum(abs(DM - np.mean(DM, axis=0)), axis=1).reshape(-1, 1)
+    D2 = np.sum(abs(DM - np.min(DM, axis=0)), axis=1).reshape(-1, 1)
+    m, n = DM.shape
+    D3 = []
+    D4 = []
+    for i in range(m):
+        temp = np.vstack((np.arange(n), DM[i,:]))
+        P = 0
+        for j in range(n):
+            P += np.linalg.norm(temp[:, j] - temp[:, wrapN(j + 1, n)])
+        A = sqrt(computePolyArea(temp[0,:], temp[1,:]))
+        D3.append(P)
+        D4.append(A)
+    D3 = np.array(D3).reshape(-1, 1)
+    D4 = np.array(D4).reshape(-1, 1)
+
+    D5 = np.zeros(DM.shape[0], dtype=int)
+    for j in range(n):
+        r = ParetRanking(DM[:, j].reshape(-1, 1))
+        D5 += + r
+    D5 = D5.reshape(-1, 1)
+
+    D6 = sum_normalizedMatrixColumns(DM)
+    D6 = D6
+
+    newDM = np.hstack((D1, D2, D3, D4, D5))
+    ranks = ParetRanking(newDM)
+    MaxFNo = np.max(ranks)
+    DT = np.arange(DM.shape[0])
+    ranked_DT = []
+
+    for i in range(MaxFNo):
+        temp = DT[ranks == i+1]
+        sorted_indices = np.argsort(D6[temp])
+        ranked_DT.append(temp[sorted_indices])
+
+    return np.array(ranked_DT)[0] # indices de toutes les options du meillieure jusqu'au pire
