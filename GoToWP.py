@@ -5,6 +5,7 @@ from compute import (
     check_segment_obstacle_collision,
     compute_distance_cartesian,
     decision_making,
+    find_nearest_waypoint,
     get_current_flight_data,
     get_power_consumption,
     get_sink_rate,
@@ -41,19 +42,6 @@ def update_remaining_energy(flight_conditions, power_consumption, time_step):
 
     return remaining_energy
 
-def find_min_index(list):
-    """
-    Returns the index of the minimum value in a list.
-
-    Args:
-        list (list): List of numeric values.
-
-    Returns:
-        int: Index of the minimum value.
-    """
-    minimum_index = min(range(len(list)), key=lambda i: list[i])
-    return minimum_index
-
 def lineXline(pA, pB):
     """
     Calculates the intersection point between two lines in 3D space.
@@ -87,7 +75,7 @@ def lineXline(pA, pB):
     return P_intersect
 
 
-def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_data, current_wp_idx):
+def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_data, current_wp_idx, thermal_map=None):
     """
     Guides a UAV towards its next waypoint while considering flight dynamics, energy constraints, and collision avoidance.
     This function computes candidate trajectories for a UAV based on its current flight mode (glide or engine), 
@@ -150,18 +138,22 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
     HorizonLength = params['horizon_length']
     ObstacleUAVs = np.concatenate([np.arange(Uidx), np.arange(Uidx+1, nUAVs)]).tolist()
     obstacles = params.get('obstacles', [])
-
+    
     # Current position and target waypoint
     current_pos = {
         'X': FLT_track[Uidx]['X'][-1],
         'Y': FLT_track[Uidx]['Y'][-1],
         'Z': FLT_track[Uidx]['Z'][-1]
     }
+    #When exiting soaring find the nearest waypoint
+    if FLT_track[Uidx]['flight_mode'][-2] == 'soaring' and FLT_track[Uidx]['flight_mode'][-1] != 'soaring':
+        current_wp_idx = find_nearest_waypoint(current_pos, GOAL_WPs)
+
     target_wp = {
-        'X': GOAL_WPs['X'][current_wp_idx],
-        'Y': GOAL_WPs['Y'][current_wp_idx],
-        'Z': GOAL_WPs['Z'][current_wp_idx]
-    }
+            'X': GOAL_WPs['X'][current_wp_idx],
+            'Y': GOAL_WPs['Y'][current_wp_idx],
+            'Z': GOAL_WPs['Z'][current_wp_idx]
+        }
     
     # Check if we've reached the current waypoint
     distance_to_wp = np.sqrt((current_pos['X'] - target_wp['X'])**2 + (current_pos['Y'] - target_wp['Y'])**2)
@@ -326,6 +318,7 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
                 PB_temp['X'].append(x_pred_descent)
                 PB_temp['Y'].append(y_pred_descent)
                 PB_temp['Z'].append(LBz)
+                
     
     # Check for obstacles and compute safety constraints
     Dist2Horizon = dict()
@@ -480,12 +473,13 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
     FLT_track[Uidx]['Z'].append(candidate_sol['Z'][idx])
     FLT_track[Uidx]['bearing'].append(candidate_sol['bearing'][idx])
 
-    if FLT_track[Uidx]['Z'][-1] <= LBz:
+    # si engine et altitude plus petit que working floor ou si glide et altitude plus petit que LBz alors engine else glide
+    if FLT_track[Uidx]['flight_mode'][-2] == 'engine' and FLT_track[Uidx]['Z'][-1] <= params['working_floor'] or \
+    FLT_track[Uidx]['flight_mode'][-2] == 'glide' and FLT_track[Uidx]['Z'][-1] <= LBz:
         FLT_track[Uidx]['flight_mode'].append('engine')
-    elif FLT_track[Uidx]['Z'][-1] >= UBz:
-        FLT_track[Uidx]['flight_mode'].append('glide')
     else:
-        FLT_track[Uidx]['flight_mode'].append(candidate_sol['flight_mode'][idx])
+        FLT_track[Uidx]['flight_mode'].append('glide')
+
     FLT_track[Uidx]['battery_capacity'].append(candidate_sol['battery_capacity'][idx])
 
     FLT_conditions[Uidx]['airspeed'] = candidate_sol['airspeed'][idx]
@@ -493,7 +487,7 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
 
     return FLT_track, FLT_conditions, current_wp_idx
 
-def gotoWaypointMulti(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, params, UAV_data, current_wp_indices):
+def gotoWaypointMulti(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, params, UAV_data, current_wp_indices, current_eval_wp_indices, thermal_map=None, EVAL_WPs=None):
     """
     Gère et contrôle plusieurs UAVs simultanément, en suivant et en mettant à jour leur progression vers leurs waypoints respectifs.
 
@@ -511,11 +505,19 @@ def gotoWaypointMulti(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, params, UAV_da
     """
     for Uidx in range(nUAVs):
         # Récupérer l'index du waypoint courant pour ce UAV
-        wp_idx = current_wp_indices[Uidx]
 
-        FLT_track, FLT_conditions, new_wp_idx = gotoWaypoint(
-            FLT_track, FLT_conditions, GOAL_WPs[Uidx], nUAVs, Uidx, params, UAV_data, wp_idx
-        )
-        # Mettre à jour l'index du waypoint pour ce UAV
-        current_wp_indices[Uidx] = new_wp_idx
-    return FLT_track, FLT_conditions, current_wp_indices
+        if not FLT_track[Uidx]['in_evaluation']:
+            wp_idx = current_wp_indices[Uidx]
+            FLT_track, FLT_conditions, new_wp_idx = gotoWaypoint(
+                FLT_track, FLT_conditions, GOAL_WPs[Uidx], nUAVs, Uidx, params, UAV_data, wp_idx, thermal_map
+            )
+            current_wp_indices[Uidx] = new_wp_idx
+        else:
+            wp_idx = current_eval_wp_indices[Uidx]
+            # Si le UAV est en évaluation, suivre les waypoints d'évaluation
+            FLT_track, FLT_conditions, new_wp_idx = gotoWaypoint(
+                FLT_track, FLT_conditions, EVAL_WPs[Uidx], nUAVs, Uidx, params, UAV_data, wp_idx, thermal_map
+            )
+            current_eval_wp_indices[Uidx] = new_wp_idx
+            
+    return FLT_track, FLT_conditions, current_wp_indices, current_eval_wp_indices
