@@ -8,7 +8,7 @@ from trajectory import TrajectoryEvaluator, generate_all_trajectories
 from thermal import ThermalGenerator, ThermalMap, ThermalEvaluator, ThermalExploiter, detect_thermal_at_position
 
 
-nUAVs = 2
+nUAVs = 1
 
 UAV_data = dict()
 UAV_data['maximum_battery_capacity'] = 10.0
@@ -78,7 +78,7 @@ T_fin = T_SEA_LEVEL + TROPO_LAPSE_RATE * (params['working_floor'])
 air_density = RHO_SEA_LEVEL * (T_fin / T_SEA_LEVEL)**(-grav_accel / (TROPO_LAPSE_RATE * R) - 1)
 
 FLT_track = {k: {} for k in range(nUAVs)}
-FLT_track_keys = ['X', 'Y', 'Z', 'bearing', 'battery_capacity', 'flight_time', 'flight_mode', 'in_evaluation']
+FLT_track_keys = ['X', 'Y', 'Z', 'bearing', 'battery_capacity', 'flight_time', 'flight_mode', 'in_evaluation', 'current_thermal_id', 'soaring_start_time']
 FLT_conditions = {k: {} for k in range(nUAVs)}
 END_WPs = {k: {} for k in range(nUAVs)}
 WPs_keys = ['X', 'Y', 'Z']
@@ -116,6 +116,8 @@ for u in range(nUAVs):
     FLT_track[u]['flight_time'].append(0.0)
     FLT_track[u]['flight_mode'].append('glide')
     FLT_track[u]['in_evaluation'] = False
+    FLT_track[u]['current_thermal_id'] = None
+    FLT_track[u]['soaring_start_time'] = None
 
     evaluator = TrajectoryEvaluator(params, UAV_data, FLT_conditions[u])
     startPoint = dict()
@@ -157,7 +159,7 @@ while True:
         }
 
         # Détection d'un nouveau thermique
-        detected_thermal_id = detect_thermal_at_position(current_pos, active_thermals, 200, current_time)
+        detected_thermal_id = detect_thermal_at_position(current_pos, active_thermals, current_time)
         
         # si des thermiques sont détectés, on les ajoute à la carte des thermiques
         if detected_thermal_id is not None:
@@ -167,6 +169,7 @@ while True:
             # Générér les Wps d'évaluation pour les thermiques détectés
             trajectoires = thermal_map.generate_evaluation_waypoints(current_pos, [detected_thermal_id])
             FLT_track[u]['in_evaluation'] = True
+            FLT_track[u]['current_thermal_id'] = detected_thermal_id
             EVAL_WPs[u]['X'] = trajectoires['X']
             EVAL_WPs[u]['Y'] = trajectoires['Y']
             EVAL_WPs[u]['Z'] = trajectoires['Z']

@@ -75,7 +75,7 @@ def lineXline(pA, pB):
     return P_intersect
 
 
-def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_data, current_wp_idx, thermal_map=None):
+def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_data, current_wp_idx, thermal_map=None, thermal_evaluator=None):
     """
     Guides a UAV towards its next waypoint while considering flight dynamics, energy constraints, and collision avoidance.
     This function computes candidate trajectories for a UAV based on its current flight mode (glide or engine), 
@@ -319,7 +319,65 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
                 PB_temp['Y'].append(y_pred_descent)
                 PB_temp['Z'].append(LBz)
                 
-    
+    elif FLT_data[Uidx]['flight_mode'] == 'soaring':
+        if thermal_map is not None and thermal_evaluator is not None:
+            # Obtenir le thermique exploité
+            thermal_id = FLT_track[Uidx].get('current_thermal_id', None)
+            if thermal_id is not None:
+                active_thermals = thermal_map.get_active_thermals(Tsim_current)
+                
+                if thermal_id in active_thermals:
+                    thermal = active_thermals[thermal_id]['thermal']
+                    
+                    # Générer des candidats de soaring (différentes positions dans la spirale)
+                    soaring_candidates = []
+
+                    # Option 1: Position actuelle dans la spirale
+                    soaring_result_1 = thermal_evaluator.generate_soaring_trajectory(
+                        current_pos, thermal, Tsim_current, t_step
+                    )
+                    soaring_candidates.append(soaring_result_1)
+
+                    # Option 2: Ajuster légèrement la position dans la spirale (avancer un peu)
+                    adjusted_pos_1 = current_pos.copy()
+                    angle_offset = 0.1  # radians
+                    current_angle = np.arctan2(current_pos['Y'] - thermal.y, current_pos['X'] - thermal.x)
+                    spiral_radius = thermal.radius * 0.6
+                    adjusted_pos_1['X'] = thermal.x + spiral_radius * np.cos(current_angle + angle_offset)
+                    adjusted_pos_1['Y'] = thermal.y + spiral_radius * np.sin(current_angle + angle_offset)
+
+                    soaring_result_2 = thermal_evaluator.generate_soaring_trajectory(
+                        adjusted_pos_1, thermal, Tsim_current, t_step
+                    )
+                    soaring_candidates.append(soaring_result_2)
+
+                    # Option 3: Ajuster dans l'autre direction
+                    adjusted_pos_2 = current_pos.copy()
+                    adjusted_pos_2['X'] = thermal.x + spiral_radius * np.cos(current_angle - angle_offset)
+                    adjusted_pos_2['Y'] = thermal.y + spiral_radius * np.sin(current_angle - angle_offset)
+
+                    soaring_result_3 = thermal_evaluator.generate_soaring_trajectory(
+                        adjusted_pos_2, thermal, Tsim_current, t_step
+                    )
+                    soaring_candidates.append(soaring_result_3)
+
+                    # Ajouter tous les candidats de soaring
+                    for soaring_result in soaring_candidates:
+                        candidate_sol['X'].append(soaring_result['X'])
+                        candidate_sol['Y'].append(soaring_result['Y'])
+                        candidate_sol['Z'].append(min(soaring_result['Z'], UBz))
+                        candidate_sol['bearing'].append(FLT_data[Uidx]['bearing'])  # Maintenir le cap actuel
+                        candidate_sol['battery_capacity'].append(FLT_data[Uidx]['battery_capacity'])  # Pas de consommation
+                        candidate_sol['flight_mode'].append('soaring')
+                        candidate_sol['airspeed'].append(min_velocity)  # Vitesse minimale en soaring
+                        candidate_sol['flight_path_angle'].append(np.arctan(soaring_result['climb_rate'] / min_velocity))
+
+                        # Pour la prédiction, rester dans le thermique
+                        PB_temp['X'].append(soaring_result['X'])
+                        PB_temp['Y'].append(soaring_result['Y'])
+                        PB_temp['Z'].append(min(soaring_result['Z'] + 50, UBz))  # Prédire une montée continue
+
+
     # Check for obstacles and compute safety constraints
     Dist2Horizon = dict()
     Dist2Horizon['X'] = []
@@ -335,20 +393,26 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
         elif FLT_data[u]['flight_mode'] == 'engine':
             dZ = FLT_data[u]['airspeed']*t_step
             pridction_distance = (abs(UBz - FLT_data[u]['Z']) / dZ)*FLT_data[u]['airspeed'] if dZ != 0 else FLT_data[u]['airspeed'] * t_step
-
+        elif FLT_data[u]['flight_mode'] == 'soaring':
+            pridction_distance = 50
+        
         REF = dict()
         REF['X'] = FLT_data[u]['X']
         REF['Y'] = FLT_data[u]['Y']
         x_obs, y_obs = get_destination_from_range_and_bearing_cartesian(REF, pridction_distance, FLT_data[u]['bearing'])
         Dist2Horizon['X'].append(x_obs)
         Dist2Horizon['Y'].append(y_obs)
-        Dist2Horizon['Z'].append(LBz)
+        if FLT_data[u]['flight_mode'] == 'soaring':
+            Dist2Horizon['Z'].append(min(FLT_data[u]['Z'] + 50, UBz))
+        else:
+            Dist2Horizon['Z'].append(LBz)
 
     x0, y0, z0 = FLT_data[Uidx]['X'], FLT_data[Uidx]['Y'], FLT_data[Uidx]['Z']
 
     for i in range(len(H)*len(V)):
         flag1 = True
         flag2 = True
+        flag3 = True
         xx0, yy0, zz0 = PB_temp['X'][i], PB_temp['Y'][i], PB_temp['Z'][i]
         
         current_point = {
@@ -472,13 +536,62 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
     FLT_track[Uidx]['Y'].append(candidate_sol['Y'][idx])
     FLT_track[Uidx]['Z'].append(candidate_sol['Z'][idx])
     FLT_track[Uidx]['bearing'].append(candidate_sol['bearing'][idx])
-
-    # si engine et altitude plus petit que working floor ou si glide et altitude plus petit que LBz alors engine else glide
-    if FLT_track[Uidx]['flight_mode'][-2] == 'engine' and FLT_track[Uidx]['Z'][-1] <= params['working_floor'] or \
-    FLT_track[Uidx]['flight_mode'][-2] == 'glide' and FLT_track[Uidx]['Z'][-1] <= LBz:
-        FLT_track[Uidx]['flight_mode'].append('engine')
+    
+    selected_mode = candidate_sol['flight_mode'][idx]
+    
+    if selected_mode == 'soaring' and thermal_map is not None and thermal_evaluator is not None:
+        thermal_id = FLT_track[Uidx].get('current_thermal_id', None)
+        if thermal_id is not None:
+            active_thermals = thermal_map.get_active_thermals(Tsim_current)
+            if thermal_id in active_thermals:
+                thermal = active_thermals[thermal_id]['thermal']
+                
+                # Obtenir les positions des autres UAVs dans le même thermique
+                other_uavs_in_thermal = []
+                for other_idx in range(nUAVs):
+                    if (other_idx != Uidx and 
+                        FLT_track[other_idx]['flight_mode'][-1] == 'soaring' and
+                        FLT_track[other_idx].get('current_thermal_id', None) == thermal_id):
+                        other_uavs_in_thermal.append({
+                            'X': FLT_track[other_idx]['X'][-1],
+                            'Y': FLT_track[other_idx]['Y'][-1],
+                            'Z': FLT_track[other_idx]['Z'][-1]
+                        })
+                
+                # Vérifier les conditions de sortie
+                current_selected_pos = {
+                    'X': candidate_sol['X'][idx],
+                    'Y': candidate_sol['Y'][idx],
+                    'Z': candidate_sol['Z'][idx]
+                }
+                soaring_start_time = FLT_track[Uidx].get('soaring_start_time', Tsim_current)
+                should_exit, exit_reason = thermal_evaluator.check_soaring_exit_conditions(
+                    current_selected_pos, thermal, soaring_start_time, Tsim_current, other_uavs_in_thermal
+                )
+                
+                if should_exit:
+                    print(f"UAV {Uidx} exiting soaring mode: {exit_reason}")
+                    selected_mode = 'glide'
+                    FLT_track[Uidx]['current_thermal_id'] = None
+                    FLT_track[Uidx]['soaring_start_time'] = None
+            else:
+                # Le thermique n'est plus actif
+                print(f"UAV {Uidx} exiting soaring mode: thermal no longer active")
+                selected_mode = 'glide'
+                FLT_track[Uidx]['current_thermal_id'] = None
+                FLT_track[Uidx]['soaring_start_time'] = None
+        else:
+            # Pas de thermique associé
+            print(f"UAV {Uidx} exiting soaring mode: no thermal associated")
+            selected_mode = 'glide'
     else:
-        FLT_track[Uidx]['flight_mode'].append('glide')
+        # Si le mode n'est pas soaring, on vérifie les conditions de vol
+        # Si engine et altitude plus petit que working floor ou si glide et altitude plus petit que LBz alors engine else glide
+        if (selected_mode == 'engine' and FLT_track[Uidx]['Z'][-1] <= params['working_floor']) or \
+           (selected_mode == 'glide' and FLT_track[Uidx]['Z'][-1] <= LBz):
+            selected_mode = 'engine'
+        else:
+            selected_mode = 'glide'
 
     FLT_track[Uidx]['battery_capacity'].append(candidate_sol['battery_capacity'][idx])
 
@@ -487,7 +600,7 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
 
     return FLT_track, FLT_conditions, current_wp_idx
 
-def gotoWaypointMulti(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, params, UAV_data, current_wp_indices, current_eval_wp_indices, thermal_map=None, EVAL_WPs=None):
+def gotoWaypointMulti(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, params, UAV_data, current_wp_indices, current_eval_wp_indices, thermal_map=None, thermal_evaluator=None, EVAL_WPs=None):
     """
     Gère et contrôle plusieurs UAVs simultanément, en suivant et en mettant à jour leur progression vers leurs waypoints respectifs.
 
@@ -506,18 +619,41 @@ def gotoWaypointMulti(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, params, UAV_da
     for Uidx in range(nUAVs):
         # Récupérer l'index du waypoint courant pour ce UAV
 
-        if not FLT_track[Uidx]['in_evaluation']:
+        if FLT_track[Uidx]['in_evaluation']:
+            # UAV en mode évaluation
+            wp_idx = current_eval_wp_indices[Uidx]
+            
+            # Vérifier si l'évaluation est terminée
+            evaluation_complete = wp_idx >= len(EVAL_WPs[Uidx]['X'])
+            
+            if not evaluation_complete:
+                # Continuer l'évaluation
+                FLT_track, FLT_conditions, new_wp_idx = gotoWaypoint(
+                    FLT_track, FLT_conditions, EVAL_WPs[Uidx], nUAVs, Uidx, params, UAV_data, wp_idx, thermal_map
+                )
+                current_eval_wp_indices[Uidx] = new_wp_idx
+                
+                # Vérifier si cette étape termine l'évaluation
+                if new_wp_idx >= len(EVAL_WPs[Uidx]['X']):
+                    evaluation_complete = True
+                    
+            if evaluation_complete:
+                FLT_track[Uidx]['in_evaluation'] = False
+                if thermal_evaluator is not None and thermal_map is not None:
+                    evaluation_result = thermal_evaluator.evaluate_thermal(FLT_track[Uidx], FLT_conditions[Uidx], len(EVAL_WPs[Uidx]['X']))
+                    
+                    if evaluation_result:
+                        FLT_track[Uidx]['flight_mode'][-1] = 'soaring'
+                        FLT_track[Uidx]['soaring_start_time'] = params['current_simulation_time']
+                    else:   
+                        FLT_track[Uidx]['flight_mode'][-1] = 'glide'
+                        FLT_track[Uidx]['current_thermal_id'] = None
+        else:
             wp_idx = current_wp_indices[Uidx]
             FLT_track, FLT_conditions, new_wp_idx = gotoWaypoint(
-                FLT_track, FLT_conditions, GOAL_WPs[Uidx], nUAVs, Uidx, params, UAV_data, wp_idx, thermal_map
+                FLT_track, FLT_conditions, GOAL_WPs[Uidx], nUAVs, Uidx, params, UAV_data, wp_idx, thermal_map, thermal_evaluator
             )
             current_wp_indices[Uidx] = new_wp_idx
-        else:
-            wp_idx = current_eval_wp_indices[Uidx]
-            # Si le UAV est en évaluation, suivre les waypoints d'évaluation
-            FLT_track, FLT_conditions, new_wp_idx = gotoWaypoint(
-                FLT_track, FLT_conditions, EVAL_WPs[Uidx], nUAVs, Uidx, params, UAV_data, wp_idx, thermal_map
-            )
-            current_eval_wp_indices[Uidx] = new_wp_idx
+            
             
     return FLT_track, FLT_conditions, current_wp_indices, current_eval_wp_indices

@@ -151,132 +151,164 @@ class ThermalEvaluator:
         self.UAV_data = UAV_data
         self.evaluation_radius = 50  # Rayon d'évaluation réduit (en mètres)
         self.min_evaluation_time = 30  # Temps minimum d'évaluation en secondes
+        self.max_soaring_time = 300  # Temps maximum d'exploitation en secondes (5 minutes)
+        self.min_separation_distance = 50  # Distance minimale entre UAVs dans un thermique (en mètres)
         
-    def evaluate_thermal(self, uav_position: Dict, thermal: Thermal, current_time: float) -> Dict:
-        """Évalue un thermique en faisant un cercle autour"""
-        
-        # Vérifier si le UAV est dans le thermique pour pouvoir l'évaluer
-        distance_to_thermal = np.sqrt((uav_position['X'] - thermal.x)**2 + 
-                                    (uav_position['Y'] - thermal.y)**2)
-        
-        # Le UAV doit être dans le thermique ou très proche pour l'évaluer
-        if distance_to_thermal > thermal.radius:
-            return {'can_evaluate': False, 'reason': 'not_in_thermal'}
-        
-        # Simuler une évaluation circulaire depuis l'intérieur du thermique
-        evaluation_result = self._simulate_circular_evaluation(uav_position, thermal, current_time)
-        
-        return evaluation_result
-    
-    def _simulate_circular_evaluation(self, uav_position: Dict, thermal: Thermal, current_time: float) -> Dict:
-        """Simule l'évaluation en cercle du thermique depuis l'intérieur"""
-        
-        # Points d'évaluation autour de la position actuelle (pas du centre du thermique)
-        num_points = 8
-        angles = np.linspace(0, 2*np.pi, num_points, endpoint=False)
-        
-        total_lift = 0
-        valid_points = 0
-        
-        for angle in angles:
-            # Position d'évaluation autour de la position actuelle du UAV
-            eval_x = uav_position['X'] + self.evaluation_radius * np.cos(angle)
-            eval_y = uav_position['Y'] + self.evaluation_radius * np.sin(angle)
-            
-            # Distance du point d'évaluation au centre du thermique
-            distance_to_center = np.sqrt((eval_x - thermal.x)**2 + (eval_y - thermal.y)**2)
-            
-            # Obtenir la vitesse de montée à ce point
-            lift_rate = thermal.get_lift_rate(current_time, distance_to_center)
-            
-            if lift_rate > 0:
-                total_lift += lift_rate
-                valid_points += 1
-        
-        # Calculer la vitesse de montée moyenne
-        avg_lift_rate = total_lift / max(valid_points, 1)
-        
-        # Critères d'évaluation
-        min_lift_threshold = 1.0  # m/s minimum pour considérer le thermique viable
-        
-        if avg_lift_rate >= min_lift_threshold and valid_points >= 4:  # Au moins la moitié des points doivent être valides
-            estimated_altitude_gain = avg_lift_rate * self.min_evaluation_time
-            return {
-                'can_evaluate': True,
-                'positive': True,
-                'avg_lift_rate': avg_lift_rate,
-                'estimated_gain': estimated_altitude_gain,
-                'thermal_center': {'X': thermal.x, 'Y': thermal.y, 'Z': uav_position['Z']},
-                'thermal_radius': thermal.radius
-            }
-        else:
-            return {
-                'can_evaluate': True,
-                'positive': False,
-                'avg_lift_rate': avg_lift_rate,
-                'reason': 'insufficient_lift'
-            }
+    def _extract_evaluation_data(flight_track, num_evaluation_points):
+        """
+        Extrait les données de vol pendant la phase d'évaluation.
 
-class ThermalExploiter:
-    """Gère l'exploitation des thermiques par les UAVs"""
-    
-    def __init__(self, params: Dict, UAV_data: Dict):
-        self.params = params
-        self.UAV_data = UAV_data
-        self.max_exploitation_time = 300  # 5 minutes maximum
-        self.min_separation_distance = 100  # Distance minimale entre UAVs dans un thermique
+        Args:
+            flight_track (dict): Historique de vol de l'UAV
+            num_evaluation_points (int): Nombre de points d'évaluation
+
+        Returns:
+            dict: Données d'évaluation (positions, altitudes, temps)
+        """
+        if num_evaluation_points <= 0:
+            return {'positions': [], 'altitudes': [], 'altitude_changes': []}
+
+        # Prendre les derniers points correspondant à l'évaluation
+        start_idx = max(0, len(flight_track['X']) - num_evaluation_points)
+
+        evaluation_data = {
+            'positions': [],
+            'altitudes': flight_track['Z'][start_idx:],
+            'altitude_changes': []
+        }
+
+        # Calculer les changements d'altitude
+        for i in range(start_idx + 1, len(flight_track['Z'])):
+            altitude_change = flight_track['Z'][i] - flight_track['Z'][i-1]
+            evaluation_data['altitude_changes'].append(altitude_change)
+
+        # Extraire les positions
+        for i in range(start_idx, len(flight_track['X'])):
+            evaluation_data['positions'].append({
+                'X': flight_track['X'][i],
+                'Y': flight_track['Y'][i],
+                'Z': flight_track['Z'][i]
+            })
+
+        return evaluation_data
+
+    def evaluate_thermal(self, flight_track, num_evaluation_points: int) -> Dict:
+        """Évalue un thermique en faisant un cercle autour"""
+        if num_evaluation_points <= 0:
+            return {'X': [], 'Y': [], 'Z': []}
         
-    def can_exploit_thermal(self, uav_id: int, thermal_center: Dict, other_uavs_positions: List[Dict]) -> bool:
-        """Vérifie si un UAV peut exploiter un thermique"""
+        # Extraire les données d'évaluation
+        evaluation_data = self._extract_evaluation_data(flight_track, num_evaluation_points)
+
+        # Calculer le gain d'altitude total et moyen
+        total_altitude_gain = sum(max(0, change) for change in evaluation_data['altitude_changes'])
+        avg_altitude_gain_per_step = total_altitude_gain / len(evaluation_data['altitude_changes']) if evaluation_data['altitude_changes'] else 0
+
+        # Calculer la vitesse de montée moyenne (en m/s)
+        time_step = 1.0  # Assumé 1 seconde par step
+        avg_climb_rate = avg_altitude_gain_per_step / time_step
+
+        # Critères de profitabilité
+        min_climb_rate = 1.0  # m/s minimum
+        min_total_gain = 10.0  # m minimum
+
+        result = (avg_climb_rate >= min_climb_rate and total_altitude_gain >= min_total_gain)
+
+        return result
+
+    def check_soaring_exit_conditions(self, current_pos: Dict, thermal: 'Thermal', 
+                                    soaring_start_time: float, current_time: float,
+                                    other_uavs_positions: List[Dict]) -> bool:
+        """
+        Vérifie les conditions de sortie du mode soaring.
         
-        # Vérifier la proximité avec d'autres UAVs
+        Args:
+            current_pos (Dict): Position actuelle de l'UAV
+            thermal (Thermal): Thermique exploité
+            soaring_start_time (float): Temps de début d'exploitation
+            current_time (float): Temps actuel
+            other_uavs_positions (List[Dict]): Positions des autres UAVs
+            
+        Returns:
+            bool: doit sortir du mode soaring
+        """
+        # 1. Vérifier la hauteur maximale
+        if current_pos['Z'] >= self.params['Z_upper_bound']:
+            return True
+        
+        # 2. Vérifier la durée d'exploitation
+        soaring_duration = current_time - soaring_start_time
+        if soaring_duration >= self.max_soaring_time:
+            return True
+        
+        # 3. Vérifier si le thermique est encore actif
+        if not thermal.is_active(current_time):
+            return True
+        
+        # 4. Vérifier la proximité avec d'autres UAVs
         for other_pos in other_uavs_positions:
-            distance = compute_distance_cartesian(thermal_center, other_pos)[0]
+            # Calculer la distance verticale entre l'UAV actuel et les autres UAVs
+            distance = current_pos['Z'] - other_pos['Z']
             if distance < self.min_separation_distance:
-                return False
+                return True
         
-        return True
+        # 5. Vérifier si on est encore dans le thermique
+        distance_to_thermal_center = np.sqrt((current_pos['X'] - thermal.x)**2 + 
+                                           (current_pos['Y'] - thermal.y)**2)
+        if distance_to_thermal_center > thermal.radius:
+            return True
+        
+        return False
     
-    def generate_thermal_exploitation_path(self, uav_position: Dict, thermal_center: Dict, 
-                                         thermal_radius: float, current_time: float) -> Dict:
-        """Génère une trajectoire en spirale pour exploiter le thermique"""
+    def generate_soaring_trajectory(self, current_pos: Dict, thermal: 'Thermal', 
+                                  current_time: float, time_step: float) -> Dict:
+        """
+        Génère une trajectoire de montée en spirale dans un thermique.
         
+        Args:
+            current_pos (Dict): Position actuelle {'X': float, 'Y': float, 'Z': float}
+            thermal (Thermal): Objet thermique à exploiter
+            current_time (float): Temps de simulation actuel
+            time_step (float): Pas de temps de simulation
+            
+        Returns:
+            Dict: Nouvelle position après exploitation du thermique
+        """
         # Paramètres de la spirale
-        num_turns = 3
-        points_per_turn = 20
-        total_points = num_turns * points_per_turn
+        spiral_radius = thermal.radius * 0.6  # 60% du rayon du thermique
+        angular_velocity = 0.1  # radians par seconde (vitesse de rotation)
         
-        # Rayon de la spirale (plus petit que le rayon du thermique)
-        spiral_radius = min(thermal_radius * 0.7, 80)  # Maximum 80m de rayon
+        # Calculer la distance du centre du thermique
+        distance_to_center = np.sqrt((current_pos['X'] - thermal.x)**2 + 
+                                   (current_pos['Y'] - thermal.y)**2)
         
-        # Génération des points de la spirale
-        angles = np.linspace(0, num_turns * 2 * np.pi, total_points)
-        
-        x_points = []
-        y_points = []
-        z_points = []
-        
-        for i, angle in enumerate(angles):
-            # Rayon progressif de la spirale
-            current_radius = spiral_radius * (1 - i / total_points * 0.3)  # Spirale qui se resserre
+        # Si trop loin du centre, se diriger vers le centre
+        if distance_to_center > spiral_radius:
+            direction_to_center = np.arctan2(thermal.y - current_pos['Y'], 
+                                           thermal.x - current_pos['X'])
+            move_distance = min(20.0, distance_to_center - spiral_radius)  # Se rapprocher progressivement
             
-            x = thermal_center['X'] + current_radius * np.cos(angle)
-            y = thermal_center['Y'] + current_radius * np.sin(angle)
+            new_x = current_pos['X'] + move_distance * np.cos(direction_to_center)
+            new_y = current_pos['Y'] + move_distance * np.sin(direction_to_center)
+        else:
+            # Effectuer une spirale autour du centre
+            current_angle = np.arctan2(current_pos['Y'] - thermal.y, 
+                                     current_pos['X'] - thermal.x)
+            new_angle = current_angle + angular_velocity * time_step
             
-            # Altitude progressive (montée dans le thermique)
-            altitude_gain_per_point = 2.0  # 2m de gain par point
-            z = uav_position['Z'] + i * altitude_gain_per_point
-            z = min(z, self.params['Z_upper_bound'])  # Limiter à l'altitude max
-            
-            x_points.append(x)
-            y_points.append(y)
-            z_points.append(z)
+            new_x = thermal.x + spiral_radius * np.cos(new_angle)
+            new_y = thermal.y + spiral_radius * np.sin(new_angle)
+        
+        # Calculer la vitesse de montée basée sur la position dans le thermique
+        distance_from_center = np.sqrt((new_x - thermal.x)**2 + (new_y - thermal.y)**2)
+        lift_rate = thermal.get_lift_rate(current_time, distance_from_center)
+        
+        # Nouvelle altitude (montée due au thermique)
+        new_z = current_pos['Z'] + lift_rate * time_step
         
         return {
-            'X': x_points,
-            'Y': y_points,
-            'Z': z_points,
-            'type': 'thermal_exploitation',
-            'start_time': current_time,
-            'thermal_center': thermal_center
+            'X': new_x,
+            'Y': new_y,
+            'Z': new_z,
+            'climb_rate': lift_rate
         }
