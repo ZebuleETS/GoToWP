@@ -145,10 +145,6 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
         'Y': FLT_track[Uidx]['Y'][-1],
         'Z': FLT_track[Uidx]['Z'][-1]
     }
-    #When exiting soaring find the nearest waypoint
-    if FLT_track[Uidx]['flight_mode'][-2] == 'soaring' and FLT_track[Uidx]['flight_mode'][-1] != 'soaring':
-        current_wp_idx = find_nearest_waypoint(current_pos, GOAL_WPs)
-
     target_wp = {
             'X': GOAL_WPs['X'][current_wp_idx],
             'Y': GOAL_WPs['Y'][current_wp_idx],
@@ -162,7 +158,7 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
     if distance_to_wp <= 10 or next_step_distance >= distance_to_wp:
         current_wp_idx += 1
         if current_wp_idx >= len(GOAL_WPs['X']):
-            current_wp_idx = len(GOAL_WPs['X']) - 1  # Stay at the last waypoint
+            current_wp_idx = len(GOAL_WPs['X'])
         return FLT_track, FLT_conditions, current_wp_idx
 
     # Obtention des données de vol actuelles
@@ -565,26 +561,27 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
                     'Z': candidate_sol['Z'][idx]
                 }
                 soaring_start_time = FLT_track[Uidx].get('soaring_start_time', Tsim_current)
-                should_exit, exit_reason = thermal_evaluator.check_soaring_exit_conditions(
+                should_exit = thermal_evaluator.check_soaring_exit_conditions(
                     current_selected_pos, thermal, soaring_start_time, Tsim_current, other_uavs_in_thermal
                 )
                 
                 if should_exit:
-                    print(f"UAV {Uidx} exiting soaring mode: {exit_reason}")
                     selected_mode = 'glide'
                     FLT_track[Uidx]['current_thermal_id'] = None
                     FLT_track[Uidx]['soaring_start_time'] = None
+                    current_wp_idx = find_nearest_waypoint(current_pos, GOAL_WPs)
             else:
                 # Le thermique n'est plus actif
-                print(f"UAV {Uidx} exiting soaring mode: thermal no longer active")
                 selected_mode = 'glide'
                 FLT_track[Uidx]['current_thermal_id'] = None
                 FLT_track[Uidx]['soaring_start_time'] = None
+                current_wp_idx = find_nearest_waypoint(current_pos, GOAL_WPs)
         else:
             # Pas de thermique associé
-            print(f"UAV {Uidx} exiting soaring mode: no thermal associated")
             selected_mode = 'glide'
-    else:
+            current_wp_idx = find_nearest_waypoint(current_pos, GOAL_WPs)
+
+    if selected_mode != 'soaring':
         # Si le mode n'est pas soaring, on vérifie les conditions de vol
         # Si engine et altitude plus petit que working floor ou si glide et altitude plus petit que LBz alors engine else glide
         if (selected_mode == 'engine' and FLT_track[Uidx]['Z'][-1] <= params['working_floor']) or \
@@ -618,7 +615,7 @@ def gotoWaypointMulti(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, params, UAV_da
     """
     for Uidx in range(nUAVs):
         # Récupérer l'index du waypoint courant pour ce UAV
-
+        print(f'in eval {FLT_track[Uidx]["in_evaluation"]}')
         if FLT_track[Uidx]['in_evaluation']:
             # UAV en mode évaluation
             wp_idx = current_eval_wp_indices[Uidx]
@@ -641,13 +638,14 @@ def gotoWaypointMulti(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, params, UAV_da
                 FLT_track[Uidx]['in_evaluation'] = False
                 if thermal_evaluator is not None and thermal_map is not None:
                     evaluation_result = thermal_evaluator.evaluate_thermal(FLT_track[Uidx], FLT_conditions[Uidx], len(EVAL_WPs[Uidx]['X']))
-                    
+                    thermal_map.change_thermal_status(FLT_track[Uidx]['current_thermal_id'], evaluated=evaluation_complete, alt_gain=evaluation_result)
                     if evaluation_result:
                         FLT_track[Uidx]['flight_mode'][-1] = 'soaring'
                         FLT_track[Uidx]['soaring_start_time'] = params['current_simulation_time']
                     else:   
                         FLT_track[Uidx]['flight_mode'][-1] = 'glide'
                         FLT_track[Uidx]['current_thermal_id'] = None
+                    
         else:
             wp_idx = current_wp_indices[Uidx]
             FLT_track, FLT_conditions, new_wp_idx = gotoWaypoint(

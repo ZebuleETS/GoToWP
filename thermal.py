@@ -35,14 +35,16 @@ class ThermalMap:
     """Carte partagée des thermiques détectés par tous les drones"""
     
     def __init__(self):
-        self.detected_thermals = {}  # {thermal_id: {'thermal': Thermal, 'detection_time': float}}
+        self.detected_thermals = {}  # {thermal_id: {'thermal': Thermal, 'detection_time': float, 'evaluated': bool, 'alt_gain': bool}}
         self.memory_duration = 600  # 10 minutes en secondes
 
     def add_thermal_detection(self, thermal_id: int, thermal: Thermal, detection_time: float):
         """Ajoute un thermique détecté à la carte partagée"""
         self.detected_thermals[thermal_id] = {
             'thermal': thermal,
-            'detection_time': detection_time
+            'detection_time': detection_time,
+            'evaluated': False,
+            'alt_gain': False
         }
 
     def get_active_thermals(self, current_time: float) -> Dict:
@@ -82,6 +84,13 @@ class ThermalMap:
                 waypoints['Z'].append(current_pos['Z'])
 
         return waypoints
+    
+    def change_thermal_status(self, thermal_id: int, evaluated: bool = False, alt_gain: bool = False):
+        """Change le statut d'un thermique détecté"""
+        if thermal_id in self.detected_thermals:
+            self.detected_thermals[thermal_id]['evaluated'] = evaluated
+            self.detected_thermals[thermal_id]['alt_gain'] = alt_gain
+            
 
 class ThermalGenerator:
     """Générateur de thermiques avec paramètres variables"""

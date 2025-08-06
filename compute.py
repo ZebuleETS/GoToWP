@@ -824,4 +824,6 @@ def decision_making(DM):
         sorted_indices = np.argsort(D6[temp])
         ranked_DT.append(temp[sorted_indices])
 
-    return np.array(ranked_DT)[0] # indices de toutes les options du meillieure jusqu'au pire
+    # Concaténer tous les rangs dans l'ordre au lieu d'essayer de créer un array 2D
+    all_ranked_indices = np.concatenate(ranked_DT)
+    return all_ranked_indices # indices de toutes les options du meillieure jusqu'au pire

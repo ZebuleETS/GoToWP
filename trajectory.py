@@ -1027,6 +1027,7 @@ class TrajectoryEvaluator:
         """
         total_distance = 0
         total_energy = 0
+        obs_penalty = 0
         x_points = trajectory['X']
         y_points = trajectory['Y']
         z_points = trajectory['Z']

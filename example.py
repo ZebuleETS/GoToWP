@@ -63,7 +63,7 @@ thermal_generator = ThermalGenerator(params)
 thermal_evaluator = ThermalEvaluator(params, UAV_data)
 
 active_thermals = thermal_generator.generate_random_thermals(3, params['current_simulation_time'])
-
+print(f'Active thermals: {active_thermals}')
 
 ACC_SEA_LEVEL = 9.80665
 T_SEA_LEVEL = 288.15
@@ -102,8 +102,10 @@ for u in range(nUAVs):
     FLT_conditions[u]['air_density'] = air_density
     FLT_conditions[u]['battery_capacity'] = UAV_data['maximum_battery_capacity']
 
-    END_WPs[u]['X'].append(np.random.uniform(params['X_lower_bound'], params['X_upper_bound'], 1)[0].tolist())
-    END_WPs[u]['Y'].append(np.random.uniform(params['Y_lower_bound'], params['Y_upper_bound'], 1)[0].tolist())
+    #END_WPs[u]['X'].append(np.random.uniform(params['X_lower_bound'], params['X_upper_bound'], 1)[0].tolist())
+    #END_WPs[u]['Y'].append(np.random.uniform(params['Y_lower_bound'], params['Y_upper_bound'], 1)[0].tolist())
+    END_WPs[u]['X'].append(active_thermals[0].x)
+    END_WPs[u]['Y'].append(active_thermals[0].y)
     END_WPs[u]['Z'].append(400.0)
 
     FLT_track[u]['X'].append(np.random.uniform(params['X_lower_bound'], params['X_upper_bound'], 1)[0].tolist())
@@ -134,9 +136,9 @@ current_wp_indices = dict()
 current_eval_wp_indices = dict()
 for u in range(nUAVs):
     current_wp_indices[u] = 1  # Initialize the current waypoint index for each UAV
-    current_eval_wp_indices[u] = 0  # Initialize the current evaluation waypoint index for each UAV
+    current_eval_wp_indices[u] = 1  # Initialize the current evaluation waypoint index for each UAV
 
-print(f'Fin: {GOAL_WPs[0]}')
+print(f'Fin: {GOAL_WPs[0]["X"][-1]}, {GOAL_WPs[0]["Y"][-1]}, {GOAL_WPs[0]["Z"][-1]}')
 print(f'Début: {startPoint}')
 D2 = compute_distance_cartesian(startPoint, GOAL_WPs[0])[-1]
 print(f'distance: {D2}')
@@ -158,35 +160,41 @@ while True:
 
         # Détection d'un nouveau thermique
         detected_thermal_id = detect_thermal_at_position(current_pos, active_thermals, current_time)
-        
-        # si des thermiques sont détectés, on les ajoute à la carte des thermiques
+        print(f'UAV {u} Detected thermal ID: {detected_thermal_id}')
+        # si une thermique est détectée, on l'ajoute à la carte des thermiques
         if detected_thermal_id is not None:
             if detected_thermal_id not in thermal_map.detected_thermals:
                 thermal_map.add_thermal_detection(detected_thermal_id, active_thermals[detected_thermal_id], current_time)
+                # Générér les Wps d'évaluation pour la thermique détectée
+                trajectoires = thermal_map.generate_evaluation_waypoints(current_pos, detected_thermal_id)
+                FLT_track[u]['in_evaluation'] = True
+                FLT_track[u]['current_thermal_id'] = detected_thermal_id
+                EVAL_WPs[u]['X'] = trajectoires['X']
+                EVAL_WPs[u]['Y'] = trajectoires['Y']
+                EVAL_WPs[u]['Z'] = trajectoires['Z']
+                # Add circle to obstacles
+                thermal = active_thermals[detected_thermal_id]
+                evaluation_obstacle = {
+                    'x': thermal.x,
+                    'y': thermal.y,
+                    'radius': thermal.radius,
+                    'z_min': current_pos['Z'] - 50,  # 50m en dessous
+                    'z_max': current_pos['Z'] + 200,  # 200m au-dessus
+                    'type': 'evaluation_zone',
+                    'uav_id': u
+                }
+                # Add the evaluation obstacle to the list of obstacles
+                if 'obstacles' not in params:
+                    params['obstacles'] = []
+                params['obstacles'].append(evaluation_obstacle)
+            else:
+                thermal = thermal_map.detected_thermals[detected_thermal_id]['thermal']
+                if thermal.is_active(current_time) and (thermal_map.detected_thermals[detected_thermal_id]['evaluated'] and thermal_map.detected_thermals[detected_thermal_id]['alt_gain']):
+                    # Si la thermique est active et a été évaluée, on peut l'utiliser pour le soaring
+                    FLT_track[u]['current_thermal_id'] = detected_thermal_id
+                    FLT_track[u]['flight_mode'].append('soaring')
+                    FLT_track[u]['soaring_start_time'] = current_time
 
-            # Générér les Wps d'évaluation pour les thermiques détectés
-            trajectoires = thermal_map.generate_evaluation_waypoints(current_pos, [detected_thermal_id])
-            FLT_track[u]['in_evaluation'] = True
-            FLT_track[u]['current_thermal_id'] = detected_thermal_id
-            EVAL_WPs[u]['X'] = trajectoires['X']
-            EVAL_WPs[u]['Y'] = trajectoires['Y']
-            EVAL_WPs[u]['Z'] = trajectoires['Z']
-            # Add circle to obstacles
-            thermal = active_thermals[detected_thermal_id]
-            evaluation_obstacle = {
-                'x': thermal.x,
-                'y': thermal.y,
-                'radius': thermal.radius,
-                'z_min': current_pos['Z'] - 50,  # 50m en dessous
-                'z_max': current_pos['Z'] + 200,  # 200m au-dessus
-                'type': 'evaluation_zone',
-                'uav_id': u
-            }
-            # Add the evaluation obstacle to the list of obstacles
-            if 'obstacles' not in params:
-                params['obstacles'] = []
-            params['obstacles'].append(evaluation_obstacle)
-    
     # Nettoyer les obstacles temporaires des UAVs qui ne sont plus en évaluation
     params['obstacles'] = [obs for obs in params['obstacles'] if obs.get('uav_id') is None or FLT_track[obs['uav_id']]['in_evaluation']]
     # Call the gotoWaypointMulti function to update the flight track and conditions
@@ -194,6 +202,6 @@ while True:
     #print(FLT_conditions[0]['airspeed'])
     #print(FLT_track[0]['X'])
     #print(FLT_track[0]['Y'])
-    #print(FLT_track[0]['Z'])
+    print(FLT_track[0]['Z'][-1])
     #print(current_wp_indices)
     #print(current_eval_wp_indices)
