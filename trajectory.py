@@ -3,9 +3,7 @@ from math import pi, asin, cos
 from abc import ABC, abstractmethod
 from compute import (
     check_trajectory_obstacles,
-    compute_bearing,
     compute_bearing_cartesian,
-    compute_distance,
     compute_distance_cartesian,
     extract_waypoint,
     get_destination_from_range_and_bearing_cartesian,

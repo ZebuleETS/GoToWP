@@ -1,7 +1,5 @@
 import numpy as np
-import time
-from typing import Dict, List, Tuple
-from compute import compute_distance_cartesian, get_destination_from_range_and_bearing_cartesian
+from typing import Dict, List
 
 class Thermal:
     """Classe représentant un thermique"""

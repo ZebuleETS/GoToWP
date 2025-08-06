@@ -1,11 +1,10 @@
 # ---------- EXAMPLE ----------
 
-from math import pi
 import numpy as np
 from GoToWP import gotoWaypointMulti
-from compute import compute_distance, compute_distance_cartesian, get_destination_from_range_and_bearing
+from compute import compute_distance_cartesian
 from trajectory import TrajectoryEvaluator, generate_all_trajectories
-from thermal import ThermalGenerator, ThermalMap, ThermalEvaluator, ThermalExploiter, detect_thermal_at_position
+from thermal import ThermalGenerator, ThermalMap, ThermalEvaluator, detect_thermal_at_position
 
 
 nUAVs = 1
@@ -62,7 +61,6 @@ params['obstacles'] = obstacles
 thermal_map = ThermalMap()
 thermal_generator = ThermalGenerator(params)
 thermal_evaluator = ThermalEvaluator(params, UAV_data)
-thermal_exploiter = ThermalExploiter(params, UAV_data)
 
 active_thermals = thermal_generator.generate_random_thermals(3, params['current_simulation_time'])
 
