@@ -637,7 +637,7 @@ def gotoWaypointMulti(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, params, UAV_da
             if evaluation_complete:
                 FLT_track[Uidx]['in_evaluation'] = False
                 if thermal_evaluator is not None and thermal_map is not None:
-                    evaluation_result = thermal_evaluator.evaluate_thermal(FLT_track[Uidx], FLT_conditions[Uidx], len(EVAL_WPs[Uidx]['X']))
+                    evaluation_result = thermal_evaluator.evaluate_thermal(FLT_track[Uidx], len(EVAL_WPs[Uidx]['X']))
                     thermal_map.change_thermal_status(FLT_track[Uidx]['current_thermal_id'], evaluated=evaluation_complete, alt_gain=evaluation_result)
                     if evaluation_result:
                         FLT_track[Uidx]['flight_mode'][-1] = 'soaring'

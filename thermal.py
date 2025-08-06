@@ -149,7 +149,6 @@ def detect_thermal_at_position(position: Dict, thermals: Dict, current_time: flo
     return None
 
 
-#pas utiliser
 class ThermalEvaluator:
     """Évaluateur de thermiques pour les UAVs"""
     
