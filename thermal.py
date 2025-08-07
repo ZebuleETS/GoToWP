@@ -159,8 +159,8 @@ class ThermalEvaluator:
         self.min_evaluation_time = 30  # Temps minimum d'évaluation en secondes
         self.max_soaring_time = 300  # Temps maximum d'exploitation en secondes (5 minutes)
         self.min_separation_distance = 50  # Distance minimale entre UAVs dans un thermique (en mètres)
-        
-    def _extract_evaluation_data(flight_track, num_evaluation_points):
+
+    def extract_evaluation_data(self, flight_track, num_evaluation_points):
         """
         Extrait les données de vol pendant la phase d'évaluation.
 
@@ -204,7 +204,7 @@ class ThermalEvaluator:
             return {'X': [], 'Y': [], 'Z': []}
         
         # Extraire les données d'évaluation
-        evaluation_data = self._extract_evaluation_data(flight_track, num_evaluation_points)
+        evaluation_data = self.extract_evaluation_data(flight_track, num_evaluation_points)
 
         # Calculer le gain d'altitude total et moyen
         total_altitude_gain = sum(max(0, change) for change in evaluation_data['altitude_changes'])

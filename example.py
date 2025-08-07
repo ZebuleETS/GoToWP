@@ -160,7 +160,6 @@ while True:
 
         # Détection d'un nouveau thermique
         detected_thermal_id = detect_thermal_at_position(current_pos, active_thermals, current_time)
-        print(f'UAV {u} Detected thermal ID: {detected_thermal_id}')
         # si une thermique est détectée, on l'ajoute à la carte des thermiques
         if detected_thermal_id is not None:
             if detected_thermal_id not in thermal_map.detected_thermals:
@@ -203,5 +202,6 @@ while True:
     #print(FLT_track[0]['X'])
     #print(FLT_track[0]['Y'])
     print(FLT_track[0]['Z'][-1])
+    print(FLT_track[0]['flight_mode'][-1])
     #print(current_wp_indices)
     #print(current_eval_wp_indices)

@@ -149,17 +149,20 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
             'X': GOAL_WPs['X'][current_wp_idx],
             'Y': GOAL_WPs['Y'][current_wp_idx],
             'Z': GOAL_WPs['Z'][current_wp_idx]
-        }
+    }
     
     # Check if we've reached the current waypoint
     distance_to_wp = np.sqrt((current_pos['X'] - target_wp['X'])**2 + (current_pos['Y'] - target_wp['Y'])**2)
     print(f"Distance to waypoint {current_wp_idx} for UAV {Uidx}: {distance_to_wp:.2f} m")
     next_step_distance = FLT_conditions[Uidx]['airspeed'] * params['time_step']
-    if distance_to_wp <= 10 or next_step_distance >= distance_to_wp:
+    print(f"Next step distance for UAV {Uidx}: {next_step_distance:.2f} m")
+    if distance_to_wp <= 10 or next_step_distance >= distance_to_wp or any(is_point_in_obstacle(target_wp, obstacle) for obstacle in obstacles):
         current_wp_idx += 1
         if current_wp_idx >= len(GOAL_WPs['X']):
             current_wp_idx = len(GOAL_WPs['X'])
         return FLT_track, FLT_conditions, current_wp_idx
+    elif distance_to_wp > 100:
+        current_wp_idx = find_nearest_waypoint(current_pos, GOAL_WPs, obstacles)
 
     # Obtention des données de vol actuelles
     FLT_data = get_current_flight_data(FLT_track, FLT_conditions, nUAVs)
@@ -405,7 +408,7 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
 
     x0, y0, z0 = FLT_data[Uidx]['X'], FLT_data[Uidx]['Y'], FLT_data[Uidx]['Z']
 
-    for i in range(len(H)*len(V)):
+    for i in range(len(candidate_sol['X'])):
         flag1 = True
         flag2 = True
         flag3 = True
@@ -500,8 +503,8 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
     C_energy = []
     C_sink = []
     C_obstacle = []
-    
-    for i in range(len(H)*len(V)):
+
+    for i in range(len(candidate_sol['X'])):
         pos = dict()
         pos['X'] = candidate_sol['X'][i]
         pos['Y'] = candidate_sol['Y'][i]
@@ -569,26 +572,26 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
                     selected_mode = 'glide'
                     FLT_track[Uidx]['current_thermal_id'] = None
                     FLT_track[Uidx]['soaring_start_time'] = None
-                    current_wp_idx = find_nearest_waypoint(current_pos, GOAL_WPs)
+                    current_wp_idx = find_nearest_waypoint(current_pos, GOAL_WPs, obstacles)
             else:
                 # Le thermique n'est plus actif
                 selected_mode = 'glide'
                 FLT_track[Uidx]['current_thermal_id'] = None
                 FLT_track[Uidx]['soaring_start_time'] = None
-                current_wp_idx = find_nearest_waypoint(current_pos, GOAL_WPs)
+                current_wp_idx = find_nearest_waypoint(current_pos, GOAL_WPs, obstacles)
         else:
             # Pas de thermique associé
             selected_mode = 'glide'
-            current_wp_idx = find_nearest_waypoint(current_pos, GOAL_WPs)
+            current_wp_idx = find_nearest_waypoint(current_pos, GOAL_WPs, obstacles)
 
     if selected_mode != 'soaring':
         # Si le mode n'est pas soaring, on vérifie les conditions de vol
         # Si engine et altitude plus petit que working floor ou si glide et altitude plus petit que LBz alors engine else glide
         if (selected_mode == 'engine' and FLT_track[Uidx]['Z'][-1] <= params['working_floor']) or \
            (selected_mode == 'glide' and FLT_track[Uidx]['Z'][-1] <= LBz):
-            selected_mode = 'engine'
+            FLT_track[Uidx]['flight_mode'].append('engine')
         else:
-            selected_mode = 'glide'
+            FLT_track[Uidx]['flight_mode'].append('glide')
 
     FLT_track[Uidx]['battery_capacity'].append(candidate_sol['battery_capacity'][idx])
 

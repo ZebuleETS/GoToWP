@@ -666,7 +666,7 @@ def find_nearest_obstacle_distance(point, obstacles):
     
     return min_distance
 
-def find_nearest_waypoint(current_pos, GOAL_WPs):
+def find_nearest_waypoint(current_pos, GOAL_WPs, obstacles=None):
     """
     Finds the index of the nearest waypoint to the current position.
 
@@ -680,8 +680,20 @@ def find_nearest_waypoint(current_pos, GOAL_WPs):
     # Calculer toutes les distances en une seule fois
     distances = compute_horizontal_distance_cartesian(current_pos, GOAL_WPs)
     
+    if obstacles:
+        # Filtrer les waypoints qui sont en collision avec des obstacles
+        valid_indices = []
+        for i in range(len(GOAL_WPs['X'])):
+            waypoint = {
+                'X': GOAL_WPs['X'][i],
+                'Y': GOAL_WPs['Y'][i],
+                'Z': GOAL_WPs['Z'][i]
+            }
+            if not is_point_in_obstacle(waypoint, obstacles):
+                valid_indices.append(i)
+
     # Trouver l'index de la distance minimale
-    nearest_index = distances.index(min(distances))
+    nearest_index = distances.index(min(valid_indices, key=lambda i: distances[i])) if obstacles else distances.index(min(distances))
     
     return nearest_index
 
