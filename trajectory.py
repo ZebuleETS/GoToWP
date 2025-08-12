@@ -862,7 +862,6 @@ def generate_all_trajectories(start_point, end_point, params, UAV_data):
     Returns:
         list: Liste avec toutes les trajectoires générées
     """
-    smoother = TrajectorySmoothing(params)
     # Générateur ligne droite
     straight_traj = StraightLineTrajectory(params, UAV_data)
     straight = straight_traj.generate_path(start_point, end_point)

@@ -184,6 +184,9 @@ def get_current_flight_data(FLT_track, FLT_conditions, nUAVs):
         FLT_data[u]['airspeed'] = FLT_conditions[u]['airspeed']
         FLT_data[u]['flight_path_angle'] = FLT_conditions[u]['flight_path_angle']
         FLT_data[u]['bank_angle'] = FLT_conditions[u]['bank_angle']
+        FLT_data[u]['in_evaluation'] = FLT_track[u]['in_evaluation']
+        FLT_data[u]['current_thermal_id'] = FLT_track[u]['current_thermal_id']
+        FLT_data[u]['soaring_start_time'] = FLT_track[u]['soaring_start_time']
 
     return FLT_data
 
@@ -589,18 +592,19 @@ def is_point_in_obstacle(point, obstacle):
         bool: True si le point est dans l'obstacle, False sinon
     """
     # Vérifier la distance horizontale par rapport au centre de l'obstacle
-    dx = point['X'] - obstacle['x']
-    dy = point['Y'] - obstacle['y']
+    dx = point['X'] - obstacle['X']
+    dy = point['Y'] - obstacle['Y']
     horizontal_distance = np.sqrt(dx**2 + dy**2)
     
     # Vérifier si le point est à l'intérieur du rayon du cylindre
     if horizontal_distance > obstacle['radius']:
         return False
-    
-    # Vérifier si le point est entre les altitudes min et max du cylindre
-    if point['Z'] < obstacle['z_min'] or point['Z'] > obstacle['z_max']:
-        return False
-    
+
+    if 'Z_min' in obstacle and 'Z_max' in obstacle:
+        # Vérifier si le point est entre les altitudes min et max du cylindre
+        if point['Z'] < obstacle['Z_min'] or point['Z'] > obstacle['Z_max']:
+            return False
+
     # Si toutes les conditions sont remplies, le point est dans l'obstacle
     return True
 
@@ -666,7 +670,7 @@ def find_nearest_obstacle_distance(point, obstacles):
     
     return min_distance
 
-def find_nearest_waypoint(current_pos, GOAL_WPs, obstacles=None):
+def find_nearest_waypoint(current_pos, GOAL_WPs, obstacles=None, exit_thermal=None):
     """
     Finds the index of the nearest waypoint to the current position.
 
@@ -689,11 +693,28 @@ def find_nearest_waypoint(current_pos, GOAL_WPs, obstacles=None):
                 'Y': GOAL_WPs['Y'][i],
                 'Z': GOAL_WPs['Z'][i]
             }
-            if not is_point_in_obstacle(waypoint, obstacles):
+            is_valid = True
+            for obstacle in obstacles:
+                if is_point_in_obstacle(waypoint, obstacle):
+                    is_valid = False
+                    break
+            if exit_thermal:
+                thermal ={
+                    'X': exit_thermal.x,
+                    'Y': exit_thermal.y,
+                    'radius': exit_thermal.radius
+                }
+                if is_point_in_obstacle(waypoint, thermal):
+                    is_valid = False
+                    break
+            
+            if is_valid:
                 valid_indices.append(i)
 
-    # Trouver l'index de la distance minimale
-    nearest_index = distances.index(min(valid_indices, key=lambda i: distances[i])) if obstacles else distances.index(min(distances))
+        nearest_index = min(valid_indices, key=lambda i: distances[i])
+    else:
+        # Pas d'obstacles, retourner simplement le plus proche
+        nearest_index = distances.index(min(distances))
     
     return nearest_index
 
@@ -800,6 +821,29 @@ def ParetRanking(costs):
 
 
 def decision_making(DM):
+    """
+    Effectue la prise de décision multi-critères en utilisant le classement de Pareto.
+    
+    Args:
+        DM (numpy.ndarray): Matrice de décision où chaque ligne représente une alternative
+                           et chaque colonne un critère.
+    
+    Returns:
+        numpy.ndarray: Indices des alternatives classées de la meilleure à la pire.
+    """
+     # Vérifier si la matrice est vide
+    if DM.shape[0] == 0:
+        return np.array([])
+    
+    # Vérifier si c'est une seule alternative
+    if DM.shape[0] == 1:
+        return np.array([0])
+    
+    # Vérifier s'il y a des valeurs à traiter
+    if DM.shape[1] == 0:
+        return np.arange(DM.shape[0])
+    
+    
     D1 = -np.sum(abs(DM - np.mean(DM, axis=0)), axis=1).reshape(-1, 1)
     D2 = np.sum(abs(DM - np.min(DM, axis=0)), axis=1).reshape(-1, 1)
     m, n = DM.shape
@@ -837,5 +881,9 @@ def decision_making(DM):
         ranked_DT.append(temp[sorted_indices])
 
     # Concaténer tous les rangs dans l'ordre au lieu d'essayer de créer un array 2D
-    all_ranked_indices = np.concatenate(ranked_DT)
+    if len(ranked_DT) > 0:
+        all_ranked_indices = np.concatenate(ranked_DT)
+    else:
+        all_ranked_indices = np.arange(DM.shape[0])
+
     return all_ranked_indices # indices de toutes les options du meillieure jusqu'au pire

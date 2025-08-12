@@ -27,18 +27,18 @@ UAV_data['max_turn_rate'] = 0.7
 # Définition des obstacles (cylindres)
 obstacles = [
     {
-        'x': 1000,        # Position X du centre (m)
-        'y': 1500,        # Position Y du centre (m)
+        'X': 1000,        # Position X du centre (m)
+        'Y': 1500,        # Position Y du centre (m)
         'radius': 200,    # Rayon du cylindre (m)
-        'z_min': 0,     # Altitude minimale de l'obstacle (m)
-        'z_max': 800      # Altitude maximale de l'obstacle (m)
+        'Z_min': 0,     # Altitude minimale de l'obstacle (m)
+        'Z_max': 800      # Altitude maximale de l'obstacle (m)
     },
     {
-        'x': 3000,
-        'y': 2000,
+        'X': 3000,
+        'Y': 2000,
         'radius': 350,
-        'z_min': 0,
-        'z_max': 500
+        'Z_min': 0,
+        'Z_max': 500
     }
 ]
 
@@ -188,11 +188,12 @@ while True:
                 params['obstacles'].append(evaluation_obstacle)
             else:
                 thermal = thermal_map.detected_thermals[detected_thermal_id]['thermal']
-                if thermal.is_active(current_time) and (thermal_map.detected_thermals[detected_thermal_id]['evaluated'] and thermal_map.detected_thermals[detected_thermal_id]['alt_gain']):
+                if thermal.is_active(current_time) and FLT_track[u]['current_thermal_id'] != detected_thermal_id and (thermal_map.detected_thermals[detected_thermal_id]['evaluated'] and thermal_map.detected_thermals[detected_thermal_id]['alt_gain']):
                     # Si la thermique est active et a été évaluée, on peut l'utiliser pour le soaring
                     FLT_track[u]['current_thermal_id'] = detected_thermal_id
                     FLT_track[u]['flight_mode'].append('soaring')
-                    FLT_track[u]['soaring_start_time'] = current_time
+                    if len(FLT_track[u]['flight_mode']) == 1 or FLT_track[u]['flight_mode'][-2] != 'soaring':
+                        FLT_track[u]['soaring_start_time'] = current_time
 
     # Nettoyer les obstacles temporaires des UAVs qui ne sont plus en évaluation
     params['obstacles'] = [obs for obs in params['obstacles'] if obs.get('uav_id') is None or FLT_track[obs['uav_id']]['in_evaluation']]
