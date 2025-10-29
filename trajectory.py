@@ -7,6 +7,7 @@ from compute import (
     compute_distance_cartesian,
     extract_waypoint,
     get_destination_from_range_and_bearing_cartesian,
+    get_destinations,
     get_power_consumption,
 )
 from typing import Dict, List
@@ -848,7 +849,7 @@ class PythagoreanHodographPath(TrajectoryGenerator):
         return result
         
         
-def generate_all_trajectories(start_point, end_point, params, UAV_data):
+def generate_all_trajectories(start_point, end_point, params, UAV_data, obstacles) -> List[Dict]:
     """
     Génère toutes les trajectoires possibles (droit, courbe, Dubins 3D, PH) entre deux points.
     Retourne un dictionnaire avec chaque type de trajectoire.
@@ -865,18 +866,22 @@ def generate_all_trajectories(start_point, end_point, params, UAV_data):
     # Générateur ligne droite
     straight_traj = StraightLineTrajectory(params, UAV_data)
     straight = straight_traj.generate_path(start_point, end_point)
-
+    straight = fix_trajectory(straight, obstacles)
+    
     # Générateur courbe circulaire
     circular_traj = CircularTrajectory(params, UAV_data)
     circular = circular_traj.generate_path(start_point, end_point)
-     
+    circular = fix_trajectory(circular, obstacles)
+    
     # Générateur Dubins 3D
     dubins_traj = DubinsPath3D(params, UAV_data)
     dubins = dubins_traj.generate_path(start_point, end_point)
-
+    dubins = fix_trajectory(dubins, obstacles)
+    
     # Générateur Pythagorean Hodograph
     ph_traj = PythagoreanHodographPath(params, UAV_data)
     ph = ph_traj.generate_path(start_point, end_point)
+    ph = fix_trajectory(ph, obstacles)
 
     # Retourne une liste avec toutes les trajectoires
     return [straight, circular, dubins, ph]
@@ -1210,3 +1215,84 @@ class TrajectorySmoothing:
             return self.smooth_dubins_junctions(trajectory)
         else:
             return trajectory
+
+
+def fix_trajectory(trajectory, obstacles):
+    """
+    Fonction pour corriger une trajectoire en cas de violations de contraintes.
+    Actuellement, cette fonction est un placeholder et retourne la trajectoire originale.
+    
+    Args:
+        trajectory (dict): Trajectoire à corriger
+        params (dict): Paramètres pour la correction
+        obstacles (list): Liste des obstacles dans l'environnement    
+
+    Returns:
+        dict: Trajectoire corrigée
+    """
+    new_trajectory = dict()
+    new_trajectory['X'] = []
+    new_trajectory['Y'] = []
+    new_trajectory['Z'] = []
+    new_trajectory['X'].insert(0, trajectory['X'][0])
+    new_trajectory['Y'].insert(0, trajectory['Y'][0])
+    new_trajectory['Z'].insert(0, trajectory['Z'][0])
+    # for each position in trajectory, check for obstacle collisions
+    for i in range(len(trajectory['X']) - 1):
+        Spoint = {
+            'X': trajectory['X'][i],
+            'Y': trajectory['Y'][i],
+            'Z': trajectory['Z'][i]
+        }
+        Fpoint = {
+            'X': trajectory['X'][i+1],
+            'Y': trajectory['Y'][i+1],
+            'Z': trajectory['Z'][i+1]
+        }
+        # Récupérer les destinations intermédiaires
+        interm_destinations = get_destinations(Spoint, Fpoint, obstacles)
+        # enlever le premier point (déjà ajouté)
+        interm_destinations = interm_destinations[1:]
+        # ajouter les points à la nouvelle trajectoire
+        for dest in interm_destinations:
+            new_trajectory['X'].insert(i+1, dest['X'])
+            new_trajectory['Y'].insert(i+1, dest['Y'])
+            new_trajectory['Z'].insert(i+1, dest['Z'])
+            
+    new_trajectory['X'].insert(len(trajectory['X']), trajectory['X'][-1])
+    new_trajectory['Y'].insert(len(trajectory['Y']), trajectory['Y'][-1])
+    new_trajectory['Z'].insert(len(trajectory['Z']), trajectory['Z'][-1])
+
+    return new_trajectory
+
+def generate_random_obstacles(num_obstacles, params):
+    """
+    Génère une liste d'obstacles polygone aléatoires dans une zone définie.
+    
+    Args:
+        num_obstacles (int): Nombre d'obstacles à générer
+        params (dict): Paramètres définissant la zone de génération et les caractéristiques des obstacles
+
+    Returns:
+        list: Liste d'obstacles générés
+    """
+    obstacles = []
+    for _ in range(num_obstacles):
+        # Générer des coordonnées aléatoires pour l'obstacle polygone
+        center_x = np.random.uniform(params['X_lower_bound'], params['X_upper_bound'])
+        center_y = np.random.uniform(params['Y_lower_bound'], params['Y_upper_bound'])
+        num_vertices = np.random.randint(3, 6)  # Nombre de sommets pour le polygone
+        radius = np.random.uniform(100, 500)
+        vertices = []
+        for _ in range(num_vertices):
+            angle = np.random.uniform(0, 2 * np.pi)
+            x = center_x + radius * np.cos(angle)
+            y = center_y + radius * np.sin(angle)
+            vertices.append((x, y))
+        obstacle = {
+            'vertices': vertices,
+        }
+        obstacles.append(obstacle)
+    return obstacles
+
+        

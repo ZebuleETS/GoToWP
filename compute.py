@@ -580,33 +580,48 @@ def calculate_optimal_climb_angle(UAV_data, flight_conditions):
     
     return min(calculated_angle, max_allowed_angle)
 
+def point_in_polygon(point, vertices):
+    """
+    Vérifie si un point est à l'intérieur d'un polygone défini par une liste de sommets.
+    Args:
+        point (tuple): Point à vérifier (x, y)
+        vertices (list): Liste des sommets du polygone [(x1, y1), (x2, y2), ...]
+    Returns:
+        bool: True si le point est à l'intérieur du polygone, False sinon
+    """
+    x, y = point
+    n = len(vertices)
+    inside = False
+    p1x, p1y = vertices[0]
+    for i in range(n + 1):
+        p2x, p2y = vertices[i % n]
+        if y > min(p1y, p2y):
+            if y <= max(p1y, p2y):
+                if x <= max(p1x, p2x):
+                    if p1y != p2y:
+                        xinters = (y - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
+                    if p1x == p2x or x <= xinters:
+                        inside = not inside
+        p1x, p1y = p2x, p2y
+    return inside
+
 def is_point_in_obstacle(point, obstacle):
     """
-    Vérifie si un point est à l'intérieur d'un obstacle cylindrique.
+    Vérifie si un point est à l'intérieur d'un obstacle polygonal.
     
     Args:
         point (dict): Point à vérifier {X, Y, Z}
-        obstacle (dict): Obstacle cylindrique {x, y, radius, z_min, z_max}
+        obstacle (dict): Obstacle polygonal {vertices: [(x1, y1), (x2, y2), ...]}
         
     Returns:
         bool: True si le point est dans l'obstacle, False sinon
     """
     # Vérifier la distance horizontale par rapport au centre de l'obstacle
-    dx = point['X'] - obstacle['X']
-    dy = point['Y'] - obstacle['Y']
-    horizontal_distance = np.sqrt(dx**2 + dy**2)
-    
-    # Vérifier si le point est à l'intérieur du rayon du cylindre
-    if horizontal_distance > obstacle['radius']:
+    if 'X' not in obstacle or 'Y' not in obstacle:
         return False
 
-    if 'Z_min' in obstacle and 'Z_max' in obstacle:
-        # Vérifier si le point est entre les altitudes min et max du cylindre
-        if point['Z'] < obstacle['Z_min'] or point['Z'] > obstacle['Z_max']:
-            return False
-
-    # Si toutes les conditions sont remplies, le point est dans l'obstacle
-    return True
+    # Vérifier si le point est à l'intérieur des limites du polygone
+    return point_in_polygon((point['X'], point['Y']), obstacle['vertices'])
 
 def check_segment_obstacle_collision(start_point, end_point, obstacle, num_checks=10):
     """
@@ -644,7 +659,7 @@ def find_nearest_obstacle_distance(point, obstacles):
     
     Args:
         point (dict): Point à vérifier {X, Y, Z}
-        obstacles (list): Liste des obstacles
+        obstacles (list): Liste des obstacles au format {'vertices': [...]}
         
     Returns:
         float: Distance au bord de l'obstacle le plus proche (négatif si à l'intérieur)
@@ -655,22 +670,58 @@ def find_nearest_obstacle_distance(point, obstacles):
     min_distance = float('inf')
     
     for obstacle in obstacles:
-        # Distance horizontale au centre
-        dx = point['X'] - obstacle['x']
-        dy = point['Y'] - obstacle['y']
-        horizontal_distance = np.sqrt(dx**2 + dy**2)
+        if 'vertices' not in obstacle:
+            continue
+            
+        vertices = np.array(obstacle['vertices'])
         
-        # Distance au bord (négative si à l'intérieur)
-        distance_to_edge = horizontal_distance - obstacle['radius']
+        # Calculer la distance minimale à chaque segment du polygone
+        min_dist_to_obstacle = float('inf')
         
-        # Vérifier si le point est entre les altitudes min et max
-        if point['Z'] >= obstacle['z_min'] and point['Z'] <= obstacle['z_max']:
-            if distance_to_edge < min_distance:
-                min_distance = distance_to_edge
+        for i in range(len(vertices)):
+            # Points du segment
+            p1 = vertices[i]
+            p2 = vertices[(i + 1) % len(vertices)]
+            
+            # Point à vérifier
+            px = point['X']
+            py = point['Y']
+            
+            # Vecteur du segment
+            dx = p2[0] - p1[0]
+            dy = p2[1] - p1[1]
+            
+            # Longueur du segment au carré
+            segment_length_sq = dx**2 + dy**2
+            
+            if segment_length_sq == 0:
+                # Le segment est un point
+                dist = np.sqrt((px - p1[0])**2 + (py - p1[1])**2)
+            else:
+                # Projection du point sur la ligne du segment
+                t = max(0, min(1, ((px - p1[0]) * dx + (py - p1[1]) * dy) / segment_length_sq))
+                
+                # Point le plus proche sur le segment
+                closest_x = p1[0] + t * dx
+                closest_y = p1[1] + t * dy
+                
+                # Distance au point le plus proche
+                dist = np.sqrt((px - closest_x)**2 + (py - closest_y)**2)
+            
+            min_dist_to_obstacle = min(min_dist_to_obstacle, dist)
+        
+        # Vérifier si le point est à l'intérieur du polygone
+        if point_in_polygon((px, py), obstacle['vertices']):
+            # Si à l'intérieur, la distance est négative
+            min_dist_to_obstacle = -min_dist_to_obstacle
+        
+        # Mettre à jour la distance minimale globale
+        if abs(min_dist_to_obstacle) < abs(min_distance):
+            min_distance = min_dist_to_obstacle
     
     return min_distance
 
-def find_nearest_waypoint(current_pos, GOAL_WPs, obstacles=None, exit_thermal=None):
+def find_nearest_waypoint(current_pos, GOAL_WPs, obstacles, exit_thermal, wp_idx):
     """
     Finds the index of the nearest waypoint to the current position.
 
@@ -684,37 +735,34 @@ def find_nearest_waypoint(current_pos, GOAL_WPs, obstacles=None, exit_thermal=No
     # Calculer toutes les distances en une seule fois
     distances = compute_horizontal_distance_cartesian(current_pos, GOAL_WPs)
     
-    if obstacles:
-        # Filtrer les waypoints qui sont en collision avec des obstacles
-        valid_indices = []
-        for i in range(len(GOAL_WPs['X'])):
-            waypoint = {
-                'X': GOAL_WPs['X'][i],
-                'Y': GOAL_WPs['Y'][i],
-                'Z': GOAL_WPs['Z'][i]
+    # Filtrer les waypoints qui sont en collision avec des obstacles
+    valid_indices = []
+    for i in range(wp_idx, len(GOAL_WPs['X'])):
+        waypoint = {
+            'X': GOAL_WPs['X'][i],
+            'Y': GOAL_WPs['Y'][i],
+            'Z': GOAL_WPs['Z'][i]
+        }
+        is_valid = True
+        for obstacle in obstacles:
+            if is_point_in_obstacle(waypoint, obstacle):
+                is_valid = False
+        
+        # Vérifier si le waypoint est à l'intérieur du thermique de sortie
+        if exit_thermal is not None:
+            thermal = {
+                'X': exit_thermal.x,
+                'Y': exit_thermal.y,
+                'radius': exit_thermal.radius
             }
-            is_valid = True
-            for obstacle in obstacles:
-                if is_point_in_obstacle(waypoint, obstacle):
-                    is_valid = False
-                    break
-            if exit_thermal:
-                thermal ={
-                    'X': exit_thermal.x,
-                    'Y': exit_thermal.y,
-                    'radius': exit_thermal.radius
-                }
-                if is_point_in_obstacle(waypoint, thermal):
-                    is_valid = False
-                    break
-            
-            if is_valid:
-                valid_indices.append(i)
+            if is_point_in_obstacle(waypoint, thermal):
+                is_valid = False
+        
+        if is_valid:
+            valid_indices.append(i)
 
-        nearest_index = min(valid_indices, key=lambda i: distances[i])
-    else:
-        # Pas d'obstacles, retourner simplement le plus proche
-        nearest_index = distances.index(min(distances))
+
+    nearest_index = min(valid_indices, key=lambda i: distances[i])
     
     return nearest_index
 
@@ -887,3 +935,392 @@ def decision_making(DM):
         all_ranked_indices = np.arange(DM.shape[0])
 
     return all_ranked_indices # indices de toutes les options du meillieure jusqu'au pire
+
+def get_climb_rate(thermal_velocity, soaring_time, params):
+
+    # note: utiliser l'altitude courante
+    altitude = thermal_velocity * soaring_time
+
+    minimum_altitude_msl = params['Z_lower_bound']
+    maximum_altitude_msl = params['Z_upper_bound']
+    working_floor = params['working_floor']
+    slope = 0.0008
+    min_acceptable_climb = 0.3
+
+    alt_clearance = altitude - minimum_altitude_msl
+    alt_range = maximum_altitude_msl - minimum_altitude_msl
+
+    if alt_clearance < 0.1 * alt_range:
+        intercept = 0
+        slope = min_acceptable_climb / (0.1 * alt_range)
+        offset = 0
+    elif altitude < working_floor:
+        intercept = min_acceptable_climb
+        slope = 0.0
+        offset = 0.0
+
+    elif alt_clearance > 0.9 * alt_range:
+        intercept = min_acceptable_climb + min(0.8 * alt_range, (maximum_altitude_msl - working_floor)) * slope;
+        slope = 10.0 * slope
+        offset = 0.9 * alt_range
+
+    else:
+        intercept = min_acceptable_climb
+        offset = max(0.1 * alt_range, (working_floor - minimum_altitude_msl))
+
+
+    climb_rate = max(slope * (alt_clearance - offset) + intercept, 0.1)
+
+    return climb_rate
+
+def turn_radius(V, phi_rad):
+    """
+    Calcule le rayon de virage pour une vitesse et un angle d'inclinaison donnés.
+    
+    Args:
+        V (float): Vitesse de vol [m/s]
+        phi_rad (float): Angle d'inclinaison [radians]
+    
+    Returns:
+        float: Rayon de virage [m]
+    """
+    g = 9.81  # gravité [m/s²]
+    return V**2 / (g * np.tan(phi_rad))
+
+def optimal_radius(thermal, UAV_data, flight_conditions):
+    """
+    Calcule le rayon optimal de virage dans un thermique pour maximiser le taux de montée net.
+    
+    Args:
+        thermal (Thermal): Objet thermique
+        UAV_data (dict): Données du UAV
+        flight_conditions (dict): Conditions de vol actuelles
+        
+    Returns:
+        tuple: (rayon_optimal, vitesse_optimale, angle_inclinaison_optimal_rad)
+            - rayon_optimal (float): Rayon de virage optimal [m]
+            - vitesse_optimale (float): Vitesse optimale [m/s]
+            - angle_inclinaison_optimal_rad (float): Angle d'inclinaison optimal [radians]
+    """
+    # Plages d'angles d'inclinaison et de vitesses à tester
+    bank_angles_rad = np.linspace(np.radians(15), np.radians(45), 50)  # Convertir en radians
+    airspeeds = np.linspace(UAV_data['min_airspeed'], UAV_data['max_airspeed'], 30)
+    
+    best_net_climb = -999
+    best_radius = None
+    best_bank_angle_rad = None
+    best_airspeed = None
+    
+    # Copier les conditions de vol pour les tests
+    test_conditions = flight_conditions.copy()
+    
+    for airspeed in airspeeds:
+        for bank_angle_rad in bank_angles_rad:
+            # Calculer le rayon de virage pour cette vitesse et cet angle
+            radius = turn_radius(airspeed, bank_angle_rad)
+            
+            # Mettre à jour les conditions de vol pour le calcul du sink rate
+            test_conditions['airspeed'] = airspeed
+            test_conditions['bank_angle'] = bank_angle_rad  # En radians
+            test_conditions['flight_path_angle'] = 0.0  # Vol en palier dans le virage
+            
+            # Calculer le taux de descente en virage (sink rate)
+            sink_rate = get_sink_rate(UAV_data, test_conditions)
+            
+            # Force thermique moyenne sur le cercle de virage
+            avg_thermal_strength = 0
+            n_points = 20
+            for i in range(n_points):
+                angle = 2 * pi * i / n_points
+                x_circle = thermal.x + radius * cos(angle)
+                y_circle = thermal.y + radius * sin(angle)
+                dist = sqrt((x_circle - thermal.x)**2 + (y_circle - thermal.y)**2)
+                avg_thermal_strength += thermal.get_lift_rate(dist)
+
+            avg_thermal_strength /= n_points
+
+            net_climb_rate = avg_thermal_strength - sink_rate
+
+            # Vérifier si cette combinaison est meilleure
+            if net_climb_rate > best_net_climb:
+                best_net_climb = net_climb_rate
+                best_radius = radius
+                best_bank_angle_rad = bank_angle_rad
+                best_airspeed = airspeed
+    
+    # Si aucune solution viable n'est trouvée, utiliser des valeurs par défaut
+    if best_radius is None:
+        best_radius = 50.0  # Rayon par défaut de 50m
+        best_airspeed = 8.0
+        best_bank_angle_rad = np.radians(30.0)  # 30° converti en radians
+    
+    return best_radius, best_airspeed, best_bank_angle_rad
+
+def calculate_optimal_soaring_parameters(UAV_data, thermal, flight_conditions):
+    """
+    Calcule les paramètres optimaux de soaring pour un UAV dans un thermique donné.
+    
+    Args:
+        UAV_data (dict): Données du UAV
+        thermal (Thermal): Objet thermique
+        flight_conditions (dict): Conditions de vol actuelles
+    
+    Returns:
+        dict: Paramètres optimaux de soaring (tous les angles en radians)
+    """
+    # Calcul du rayon optimal
+    optimal_r, optimal_speed, optimal_bank_angle_rad = optimal_radius(thermal, UAV_data, flight_conditions)
+
+    return {
+        'optimal_radius': optimal_r,
+        'optimal_speed': optimal_speed,
+        'optimal_bank_angle': optimal_bank_angle_rad,  # En radians
+    }
+    
+# Fix trajectory collision functions
+def EdgeCollision(Edge1, Edge2):
+    tol = 0.0
+    eps = 2.2204e-16
+    p1 = Edge1[0:2]
+    p2 = Edge1[2:4]
+    p3 = Edge2[0:2]
+    p4 = Edge2[2:4]
+
+    colliding = 0
+    if (abs((p1[0] - p3[0]) <= tol) and (abs(p1[1] - p3[1]) <= tol) and (abs(p2[0] - p4[0]) <= tol) and (abs(p2[1] - p4[1]) <= tol)):
+        colliding = 1
+        return colliding
+
+    temp1 = p1 - p3
+    temp2 = p2 - p3
+    temp3 = p3 - p1
+    temp4 = p4 - p1
+    temp5 = p4 - p3
+    temp6 = p2 - p1
+    M1 = np.array([[temp1[0], temp2[0], temp3[0], temp4[0]], [temp1[1], temp2[1], temp3[1], temp4[1]], [0, 0, 0, 0]])
+    M2 = np.array([[temp5[0], temp5[0], temp6[0], temp6[0]], [temp5[1], temp5[1], temp6[1], temp6[1]], [0, 0, 0, 0]])
+
+    d = np.array([]).reshape(3, 0)
+    for i in range(4):
+        temp = np.cross(M1[:,i], M2[:,i]).reshape(3,1)
+        d = np.concatenate((d, temp), axis=1)
+    d = d[-1,:]
+
+    if ((d[0] > 0 and d[1] < 0) or (d[0] < 0 and d[1] > 0)) and ((d[2] > 0 and d[3] < 0) or (d[2] < 0 and d[3] > 0)):
+        colliding = 1
+    elif(abs(d[0]) < 100 * eps and OnSegment(p3, p4, p1)):
+        colliding = 1
+    elif(abs(d[1]) < 100 * eps and OnSegment(p3, p4, p2)):
+        colliding = 1
+    elif(abs(d[2]) < 100 * eps and OnSegment(p1, p2, p3)):
+        colliding = 1
+    elif(abs(d[3]) < 100 * eps and OnSegment(p1, p2, p4)):
+        colliding = 1
+
+    if colliding == 1:
+        A1, b1 = EdgePtsToVec(Edge1)
+        A2, b2 = EdgePtsToVec(Edge2)
+        colliding = AffineIntersect(np.array([[A1[0], A1[1]], [A2[0], A2[1]]]), np.concatenate((b1, b2), axis=0))
+
+    return colliding
+
+def OnSegment(pi, pj, pk):
+    val = 0
+    if (min(pi[0], pj[0]) <= pk[0] and pk[0] <= max(pi[0], pj[0])) and (min(pi[1], pj[1]) <= pk[1] and pk[1] <= max(pi[1], pj[1])):
+        val = 1
+    return val
+
+def AffineIntersect(A, b):
+    for i in range(2):
+        for j in range(2):
+            if np.isnan(A[i,j]) or np.isinf(A[i,j]) or A[i,j] > 1e6:
+                A[i,j] = 1e6
+
+    if (np.linalg.cond(A) > 1e6):
+        doesIntersect = 0
+        return doesIntersect
+
+    doesIntersect = 1
+    return doesIntersect
+
+def EdgePtsToVec(edge):
+    f = np.array([edge[0], edge[1], 0])
+    g = np.array([edge[2], edge[3], 0])
+    A = np.cross(f - g, np.array([0, 0, 1]))
+    A = A / np.linalg.norm(A)
+    b = np.multiply(A, f)
+    return A[0:2], b
+
+def CheckCollision(ptA, ptB, obstEdges):
+    n = obstEdges.shape[0]
+    inCollision = 0
+    for k in range(n):
+        cnd1 = (max(ptA[0], ptB[0]) < min(obstEdges[k, 0], obstEdges[k, 2]))
+        cnd2 = (min(ptA[0], ptB[0]) > max(obstEdges[k, 0], obstEdges[k, 2]))
+        cnd3 = (max(ptA[1], ptB[1]) < min(obstEdges[k, 1], obstEdges[k, 3]))
+        cnd4 = (min(ptA[1], ptB[1]) > max(obstEdges[k, 1], obstEdges[k, 3]))
+        cnd = cnd1 or cnd2 or cnd3 or cnd4
+        if not cnd:
+            cnd5 = EdgeCollision(np.array([ptA[0], ptA[1], ptB[0], ptB[1]]), obstEdges[k,:])
+            if cnd5:
+                if (sum(abs(ptA - obstEdges[k, 0:2])) > 0 and
+                        sum(abs(ptB-obstEdges[k, 0:2])) > 0 and
+                        sum(abs(ptA - obstEdges[k, 2:4])) > 0 and
+                        sum(abs(ptB - obstEdges[k, 2:4])) > 0):
+                    inCollision = 1
+                    return inCollision
+    return inCollision
+
+def get_destinations(startPos, endPos, obstacles):
+    """
+    Calcule un chemin entre deux points en évitant les obstacles polygonaux.
+    
+    Args:
+        startPos (dict): Point de départ {X, Y, Z}
+        endPos (dict): Point d'arrivée {X, Y, Z}
+        obstacles (list): Liste d'obstacles au format {'vertices': np.array([(x1,y1), (x2,y2), ...])}
+        
+    Returns:
+        list: Liste de points formant le chemin [{X, Y, Z}, ...]
+    """
+    import numpy as np
+    
+    # Convertir les obstacles en format numpy array
+    obstacle_arrays = []
+    for obs in obstacles:
+        if isinstance(obs, dict) and 'vertices' in obs:
+            # Convertir les vertices en numpy array si ce n'est pas déjà fait
+            vertices = np.array(obs['vertices']) if not isinstance(obs['vertices'], np.ndarray) else obs['vertices']
+            obstacle_arrays.append(vertices)
+        elif isinstance(obs, np.ndarray):
+            # Si c'est déjà un array numpy (format direct)
+            obstacle_arrays.append(obs)
+    
+    # Si pas d'obstacles, retourner une ligne droite
+    if len(obstacle_arrays) == 0:
+        return [startPos, endPos]
+    
+    numObsts = len(obstacle_arrays)
+    allGraphPts = np.array([]).reshape(0,2)
+    obsEdges = np.array([]).reshape(0,4)
+    
+    for i in range(numObsts):
+        numOPts = obstacle_arrays[i].shape[0]
+        allGraphPts = np.concatenate((allGraphPts, obstacle_arrays[i]), axis=0)
+        obsEdges = np.concatenate((obsEdges, np.concatenate((obstacle_arrays[i], obstacle_arrays[i][np.mod(np.arange(numOPts)+1,numOPts),:]), axis=1)), axis=0)
+
+    # Convertir startPos et endPos en format numpy array 2D
+    startPosArray = np.array([[startPos['X'], startPos['Y']]])
+    endPosArray = np.array([[endPos['X'], endPos['Y']]])
+    
+    allGraphPts = np.concatenate((allGraphPts, startPosArray), axis=0)
+    allGraphPts = np.concatenate((allGraphPts, endPosArray), axis=0)
+
+    n = allGraphPts.shape[0]
+    A = np.ones((n, n)) - np.eye(n)
+    ptCount = -1
+    
+    for i in range(numObsts):
+        numOPts = obstacle_arrays[i].shape[0]
+        X = np.arange(ptCount + 1, ptCount + numOPts + 1)
+        for j in range(len(X)):
+            A[X, X[j]] = 0
+        for k in range(numOPts-1):
+            A[ptCount + 1 + k, ptCount + k + 2] = 1
+            A[ptCount + k + 2, ptCount + 1 + k] = 1
+
+        A[ptCount + 1, ptCount + numOPts] = 1
+        A[ptCount + numOPts, ptCount + 1] = 1
+
+        ptCount += numOPts
+
+    for i in range(n):
+        for j in range(i,n):
+            inColl = CheckCollision(allGraphPts[i,:], allGraphPts[j,:], obsEdges)
+            if inColl == 1:
+                A[i, j] = 0
+                A[j, i] = 0
+
+
+    id_source = n - 2
+    PATHs = dict()
+    boolean_list = [bool(x) for x in A[id_source,:].tolist()]
+    temp = np.array([]).reshape(0, 2)
+    for b in range(len(boolean_list)):
+        if boolean_list[b]:
+            temp = np.concatenate((temp, allGraphPts[b,:].reshape(1,2)), axis=0)
+    
+    for i in range(temp.shape[0]):
+        PATHs[str(i)] = np.vstack((startPosArray[0,:], temp[i,:]))
+        if all(temp[i,:] == endPosArray[0,:]):
+            flag = False
+            break
+        else:
+            flag = True
+
+    nPATHs = len(PATHs)
+    while flag:
+        P = dict()
+        nP = 0
+        for i in range(len(PATHs)):
+            if flag:
+                AA = A[np.all(allGraphPts == PATHs[str(i)][-1, :], axis=1).tolist()]
+                for ii in range(AA.shape[0]):
+                    boolean_list = [bool(x) for x in AA[ii, :].tolist()]
+                    temp = np.array([]).reshape(0, 2)
+                    for b in range(len(boolean_list)):
+                        if boolean_list[b]:
+                            temp = np.concatenate((temp, allGraphPts[b, :].reshape(1, 2)), axis=0)
+                    temp2 = dict()
+                    for j in range(temp.shape[0]):
+                        temp2[str(j)] = np.vstack((PATHs[str(i)], temp[j, :]))
+                        if all(temp[j, :] == endPosArray[0, :]):
+                            flag = False
+                            break
+
+                    for jj in range(len(temp2)):
+                        P[str(nP+jj)] = temp2[str(jj)]
+                    nP = len(P)
+
+        for k in range(len(P)):
+            PATHs[str(nPATHs+k)] = P[str(k)]
+        nPATHs = len(PATHs)
+
+
+    # Convertir le résultat en liste de dictionnaires
+    final_path = PATHs[str(len(PATHs)-1)]
+    result = []
+    for point in final_path:
+        result.append({
+            'X': float(point[0]),
+            'Y': float(point[1]),
+            'Z': startPos['Z']  # Utiliser l'altitude du point de départ
+        })
+    
+    return result
+
+def convert_cylindrical_obstacles_to_polygons(obstacles, num_points=16):
+    """
+    Convertit des obstacles cylindriques en polygones approximatifs.
+    
+    Args:
+        obstacles (list): Liste des obstacles cylindriques avec 'X', 'Y', 'radius'
+        num_points (int): Nombre de points pour approximer le cercle
+        
+    Returns:
+        list: Liste de tableaux numpy contenant les sommets des polygones
+    """
+    polygon_obstacles = []
+    
+    for obs in obstacles:
+        # Générer des points autour du cercle
+        angles = np.linspace(0, 2*np.pi, num_points, endpoint=False)
+        vertices = np.zeros((num_points, 2))
+        
+        for i, angle in enumerate(angles):
+            vertices[i, 0] = obs['X'] + obs['radius'] * np.cos(angle)
+            vertices[i, 1] = obs['Y'] + obs['radius'] * np.sin(angle)
+        
+        polygon_obstacles.append(vertices)
+    
+    return polygon_obstacles
