@@ -91,11 +91,11 @@ for u in range(nUAVs):
     FLT_conditions[u]['air_density'] = air_density
     FLT_conditions[u]['battery_capacity'] = UAV_data['maximum_battery_capacity']
 
-    #END_WPs[u]['X'].append(np.random.uniform(params['X_lower_bound'], params['X_upper_bound'], 1)[0].tolist())
-    #END_WPs[u]['Y'].append(np.random.uniform(params['Y_lower_bound'], params['Y_upper_bound'], 1)[0].tolist())
-    END_WPs[u]['X'].append(active_thermals[0].x)
-    END_WPs[u]['Y'].append(active_thermals[0].y)
-    END_WPs[u]['Z'].append(400.0)
+    END_WPs[u]['X'].append(np.random.uniform(params['X_lower_bound'], params['X_upper_bound'], 1)[0].tolist())
+    END_WPs[u]['Y'].append(np.random.uniform(params['Y_lower_bound'], params['Y_upper_bound'], 1)[0].tolist())
+    #END_WPs[u]['X'].append(active_thermals[0].x)
+    #END_WPs[u]['Y'].append(active_thermals[0].y)
+    #END_WPs[u]['Z'].append(400.0)
 
     FLT_track[u]['X'].append(np.random.uniform(params['X_lower_bound'], params['X_upper_bound'], 1)[0].tolist())
     FLT_track[u]['Y'].append(np.random.uniform(params['Y_lower_bound'], params['Y_upper_bound'], 1)[0].tolist())
