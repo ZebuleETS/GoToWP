@@ -1,0 +1,5 @@
+mavsdk==3.5.0
+numpy==2.3.4
+pymavlink==2.4.49
+scipy==1.16.3
+numpy==2.3.1
