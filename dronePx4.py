@@ -361,22 +361,17 @@ async def run_multi_uav_simulation():
         FLT_conditions[u]['air_density'] = air_density
         FLT_conditions[u]['battery_capacity'] = UAV_data['maximum_battery_capacity']
         
-        # Position de départ espacée pour éviter les collisions
-        spacing = 200  # 200m entre chaque UAV
-        row = u // 3
-        col = u % 3
-        start_x = params['X_lower_bound'] + 500 + col * spacing
-        start_y = params['Y_lower_bound'] + 500 + row * spacing
+
+        FLT_track[u]['X'].append(np.random.uniform(params['X_lower_bound'], params['X_upper_bound'], 1)[0].tolist())
+        FLT_track[u]['Y'].append(np.random.uniform(params['Y_lower_bound'], params['Y_upper_bound'], 1)[0].tolist())
         
-        # Waypoint final (chaque UAV va vers une thermique différente)
-        target_thermal_idx = u % len(active_thermals)
-        END_WPs[u]['X'].append(active_thermals[target_thermal_idx].x)
-        END_WPs[u]['Y'].append(active_thermals[target_thermal_idx].y)
+        END_WPs[u]['X'].append(np.random.uniform(params['X_lower_bound'], params['X_upper_bound'], 1)[0].tolist())
+        END_WPs[u]['Y'].append(np.random.uniform(params['Y_lower_bound'], params['Y_upper_bound'], 1)[0].tolist())
         END_WPs[u]['Z'].append(400.0)
         
         # Position initiale
-        FLT_track[u]['X'].append(start_x)
-        FLT_track[u]['Y'].append(start_y)
+        FLT_track[u]['X'].append(np.random.uniform(params['X_lower_bound'], params['X_upper_bound'], 1)[0].tolist())
+        FLT_track[u]['Y'].append(np.random.uniform(params['Y_lower_bound'], params['Y_upper_bound'], 1)[0].tolist())
         FLT_track[u]['Z'].append(400.0)
         FLT_track[u]['bearing'].append(0.0)
         FLT_track[u]['battery_capacity'].append(UAV_data['maximum_battery_capacity'])
@@ -399,8 +394,7 @@ async def run_multi_uav_simulation():
         GOAL_WPs[u]['X'] = optimal_trajectoires['X']
         GOAL_WPs[u]['Y'] = optimal_trajectoires['Y']
         GOAL_WPs[u]['Z'] = optimal_trajectoires['Z']
-        
-        print(f"  UAV {u}: Départ ({start_x:.0f}, {start_y:.0f}) → Thermique {target_thermal_idx}")
+    
     
     current_wp_indices = {u: 1 for u in range(nUAVs)}
     current_eval_wp_indices = {u: 1 for u in range(nUAVs)}
