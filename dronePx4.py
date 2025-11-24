@@ -42,7 +42,7 @@ class PX4SITLBridge:
         connection_string = f"udpin://0.0.0.0:{self.connection_port}"
         print(f"[UAV {self.uav_id}] Connexion sur {connection_string}...")
         
-        self.drone = System(mavsdk_server_address="127.0.0.1", mavsdk_server_port=self.mavsdk_port)
+        self.drone = System(mavsdk_server_address="127.0.0.1", port=self.mavsdk_port)
         await self.drone.connect()
         
         # Attendre la connexion
@@ -83,13 +83,13 @@ class PX4SITLBridge:
         print(f"[UAV {self.uav_id}] Décollage...")
         await self.drone.action.takeoff()
         
-        #target_alt = 400
-        #async for position in self.drone.telemetry.position():
-        #    current_alt = position.relative_altitude_m
-        #    print(f"[UAV {self.uav_id}] Altitude actuelle: {current_alt:.1f}m / {target_alt:.1f}m", end='\r')
-        #    if current_alt >= target_alt * 0.9:
-        #        print(f"[UAV {self.uav_id}] ✓ Altitude atteinte: {current_alt:.1f}m")
-        #        break
+        target_alt = 400
+        async for position in self.drone.telemetry.position():
+            current_alt = position.relative_altitude_m
+            print(f"[UAV {self.uav_id}] Altitude actuelle: {current_alt:.1f}m / {target_alt:.1f}m", end='\r')
+            if current_alt >= target_alt * 0.9:
+                print(f"[UAV {self.uav_id}] ✓ Altitude atteinte: {current_alt:.1f}m")
+                break
     
     async def update_from_simulation_state(self, FLT_track, FLT_conditions):
         """
