@@ -6,14 +6,15 @@ Support de plusieurs drones avec thermiques partagées
 import asyncio
 import numpy as np
 from mavsdk import System
-from mavsdk.offboard import OffboardError, PositionNedYaw, VelocityNedYaw
+from mavsdk.offboard import OffboardError, PositionNedYaw, VelocityNedYaw, AttitudeRate
 from mavsdk.telemetry import LandedState
 import time
+import pymap3d as pm
 
 # Importer vos modules existants
 from GoToWP import gotoWaypointMulti
-from compute import compute_distance_cartesian
-from trajectory import TrajectoryEvaluator, generate_all_trajectories, generate_random_obstacles
+from compute import compute_distance_cartesian, geographic_to_cartesian, cartesian_to_geographic
+from trajectory import TrajectoryEvaluator, generate_all_trajectories, generate_random_obstacles, fix_trajectory, StraightLineTrajectory
 from thermal import ThermalGenerator, ThermalMap, ThermalEvaluator
 
 
@@ -22,31 +23,27 @@ class PX4SITLBridge:
     Pont entre votre simulation et PX4 SITL pour un seul UAV
     """
     
-    def __init__(self, uav_id, params, UAV_data, connection_port):
+    def __init__(self, uav_id, params, UAV_data, connection_port, mavsdk_port):
         self.uav_id = uav_id
         self.params = params
         self.UAV_data = UAV_data
         self.connection_port = connection_port
-        self.drone = System()
+        self.mavsdk_port = mavsdk_port
+        self.drone = None
         self.is_connected = False
         self.home_position = None
         self.simulation_origin = None
         
         # Taux de mise à jour (Hz)
         self.update_rate = 10
-        
-        # Offset pour séparer les drones au départ
-        self.spawn_offset = {
-            'x': (uav_id % 3) * 100,  # Espacer de 100m en X
-            'y': (uav_id // 3) * 100   # Espacer de 100m en Y
-        }
     
     async def connect(self):
         """Connexion à l'instance PX4 SITL"""
-        connection_string = f"udp://:{self.connection_port}"
+        connection_string = f"udpin://0.0.0.0:{self.connection_port}"
         print(f"[UAV {self.uav_id}] Connexion sur {connection_string}...")
         
-        await self.drone.connect(system_address=connection_string)
+        self.drone = System(mavsdk_server_address="127.0.0.1", mavsdk_server_port=self.mavsdk_port)
+        await self.drone.connect()
         
         # Attendre la connexion
         async for state in self.drone.core.connection_state():
@@ -55,17 +52,17 @@ class PX4SITLBridge:
                 self.is_connected = True
                 break
         
-        # Attendre le fix GPS
-        print(f"[UAV {self.uav_id}] Attente du fix GPS...")
+        # Attendre le GPS
+        print(f"[UAV {self.uav_id}] Attente du GPS...")
         async for health in self.drone.telemetry.health():
             if health.is_global_position_ok and health.is_home_position_ok:
-                print(f"[UAV {self.uav_id}] ✓ GPS fix obtenu!")
+                print(f"[UAV {self.uav_id}] ✓ GPS obtenu!")
                 break
         
         # Stocker la position home
-        async for position in self.drone.telemetry.position():
-            self.home_position = position
-            print(f"[UAV {self.uav_id}] ✓ Position home: {position.latitude_deg:.6f}, {position.longitude_deg:.6f}")
+        async for terrain_info in self.drone.telemetry.home():
+            self.home_position = terrain_info
+            print(f"[UAV {self.uav_id}] ✓ Position home: {terrain_info.latitude_deg:.6f}, {terrain_info.longitude_deg:.6f}")
             break
         
         # Définir l'origine de la simulation
@@ -75,70 +72,109 @@ class PX4SITLBridge:
             'alt': self.home_position.absolute_altitude_m
         }
     
-    def xyz_to_ned(self, x, y, z):
-        """Convertir XYZ vers NED"""
-        north = y
-        east = x
-        down = -(z - self.params['working_floor'])
-        return north, east, down
-    
-    def ned_to_gps(self, north, east, down):
-        """Convertir NED vers GPS"""
-        lat_offset = north / 111320.0
-        lon_offset = east / (111320.0 * np.cos(np.radians(self.simulation_origin['lat'])))
-        
-        lat = self.simulation_origin['lat'] + lat_offset
-        lon = self.simulation_origin['lon'] + lon_offset
-        alt = self.simulation_origin['alt'] - down
-        
-        return lat, lon, alt
-    
     async def arm_and_takeoff(self):
         """Armement et décollage"""
+        
+        await self.drone.action.hold()
+        
         print(f"[UAV {self.uav_id}] Armement...")
         await self.drone.action.arm()
-        await asyncio.sleep(2)
         
         print(f"[UAV {self.uav_id}] Décollage...")
         await self.drone.action.takeoff()
         
-        target_alt = self.params['working_floor']
-        async for position in self.drone.telemetry.position():
-            current_alt = position.relative_altitude_m
-            if current_alt >= target_alt * 0.9:
-                print(f"[UAV {self.uav_id}] ✓ Altitude atteinte: {current_alt:.1f}m")
-                break
-            await asyncio.sleep(0.5)
+        #target_alt = 400
+        #async for position in self.drone.telemetry.position():
+        #    current_alt = position.relative_altitude_m
+        #    print(f"[UAV {self.uav_id}] Altitude actuelle: {current_alt:.1f}m / {target_alt:.1f}m", end='\r')
+        #    if current_alt >= target_alt * 0.9:
+        #        print(f"[UAV {self.uav_id}] ✓ Altitude atteinte: {current_alt:.1f}m")
+        #        break
     
-    async def send_position_ned(self, north, east, down, yaw=0.0):
-        """Envoyer commande de position"""
-        await self.drone.offboard.set_position_ned(
-            PositionNedYaw(north, east, down, yaw)
-        )
-    
-    async def update_from_simulation_state(self, FLT_track):
-        """Mettre à jour PX4 avec l'état de simulation"""
+    async def update_from_simulation_state(self, FLT_track, FLT_conditions):
+        """
+        Mettre à jour PX4 avec l'état de simulation complet
+        Utilise pymap3d pour les conversions de coordonnées
+        """
         if len(FLT_track['X']) == 0:
             return
         
-        x = FLT_track['X'][-1]
-        y = FLT_track['Y'][-1]
-        z = FLT_track['Z'][-1]
-        bearing = FLT_track['bearing'][-1]
+        # Position cartésienne locale (East, North, Up dans votre simulation)
+        x_local = FLT_track['X'][-1]  # East
+        y_local = FLT_track['Y'][-1]  # North
+        z_local = FLT_track['Z'][-1]  # Up (altitude)
         
-        north, east, down = self.xyz_to_ned(x, y, z)
-        yaw = np.radians(bearing)
+        # Origine de référence
+        lat0 = self.simulation_origin['lat']
+        lon0 = self.simulation_origin['lon']
+        h0 = self.simulation_origin['alt']
         
-        await self.send_position_ned(north, east, down, yaw)
+        # Convertir position locale (ENU) en géographique
+        # pymap3d utilise (East, North, Up)
+        lat_deg, lon_deg, alt_msl = pm.enu2geodetic(
+            x_local, y_local, z_local,
+            lat0, lon0, h0
+        )
+        
+        # Convertir en ECEF pour obtenir les coordonnées absolues
+        x_ecef, y_ecef, z_ecef = pm.geodetic2ecef(lat_deg, lon_deg, alt_msl)
+        
+        # Convertir ECEF en NED par rapport à l'origine
+        north_ned, east_ned, down_ned = pm.ecef2ned(
+            x_ecef, y_ecef, z_ecef,
+            lat0, lon0, h0
+        )
+        
+        # Orientation (bearing en radians)
+        bearing_rad = FLT_track['bearing'][-1]
+        yaw_deg = np.degrees(bearing_rad)
+        
+        # Vitesse aérodynamique
+        airspeed = FLT_conditions['airspeed']
+        flight_path_angle = FLT_conditions['flight_path_angle']
+        
+        # Calculer les composantes de vitesse dans le référentiel local (ENU)
+        # Vitesse horizontale
+        v_horizontal = airspeed * np.cos(flight_path_angle)
+        
+        # Composantes Est et Nord basées sur le bearing
+        velocity_east = v_horizontal * np.sin(bearing_rad)
+        velocity_north = v_horizontal * np.cos(bearing_rad)
+        velocity_up = airspeed * np.sin(flight_path_angle)
+        
+        # Convertir les vitesses ENU en NED
+        # NED: North, East, Down (Down est l'opposé de Up)
+        velocity_north_ned = velocity_north
+        velocity_east_ned = velocity_east
+        velocity_down_ned = -velocity_up  # Down = -Up
+        
+        # Alternative: Convertir via ECEF si besoin de plus de précision
+        # Pour les vitesses, on peut aussi faire la transformation directe
+        # car c'est juste une rotation de coordonnées
+        
+        # Envoyer la commande combinée position + vitesse NED
+        await self.drone.offboard.set_position_velocity_ned(
+                PositionNedYaw(north_ned, east_ned, down_ned, yaw_deg),
+                VelocityNedYaw(velocity_north_ned, velocity_east_ned, velocity_down_ned, yaw_deg)
+            )
+        #try:
+        #    await self.drone.offboard.set_position_velocity_ned(
+        #        PositionNedYaw(north_ned, east_ned, down_ned, yaw_deg),
+        #        VelocityNedYaw(velocity_north_ned, velocity_east_ned, velocity_down_ned, yaw_deg)
+        #    )
+        #except Exception as e:
+        #    print(f"[UAV {self.uav_id}] Erreur set_position_velocity_ned: {e}")
     
     async def start_offboard_mode(self):
-        """Démarrer le mode offboard"""
-        print(f"[UAV {self.uav_id}] Démarrage mode offboard...")
-        await self.send_position_ned(0.0, 0.0, -self.params['working_floor'])
+        """Démarrer le mode offboard avec contrôle en vitesse"""
+        print(f"[UAV {self.uav_id}] Démarrage mode offboard ...")
+        await self.drone.offboard.set_position_ned(
+               PositionNedYaw(0.0, 0.0, 0.0, 0.0)
+            )
         
         try:
             await self.drone.offboard.start()
-            print(f"[UAV {self.uav_id}] ✓ Mode offboard activé")
+            print(f"[UAV {self.uav_id}] ✓ Mode offboard activé ")
             return True
         except OffboardError as error:
             print(f"[UAV {self.uav_id}] ✗ Erreur offboard: {error}")
@@ -183,6 +219,10 @@ class MultiUAVController:
         """Obtenir le port de connexion pour un UAV"""
         return self.base_port + uav_id
     
+    def get_mavsdk_port(self, uav_id):
+        """Obtenir le port MAVSDK pour un UAV"""
+        return 50051 + uav_id
+    
     async def initialize_all_uavs(self):
         """Initialiser tous les UAVs en parallèle"""
         print("\n" + "="*70)
@@ -192,34 +232,40 @@ class MultiUAVController:
         # Créer les bridges pour tous les UAVs
         for u in range(self.nUAVs):
             port = self.get_connection_port(u)
-            bridge = PX4SITLBridge(u, self.params, self.UAV_data, port)
+            mavsdk_port = self.get_mavsdk_port(u)
+            bridge = PX4SITLBridge(u, self.params, self.UAV_data, port, mavsdk_port)
             self.bridges.append(bridge)
         
         # Connecter tous les UAVs en parallèle
         print("\nConnexion aux UAVs...")
-        connection_tasks = [bridge.connect() for bridge in self.bridges]
-        await asyncio.gather(*connection_tasks)
+        tasks = []
+        for u in range(self.nUAVs):
+            tasks.append(asyncio.create_task(self.bridges[u].connect()))
+        await asyncio.gather(*tasks)
         
         print("\n✓ Tous les UAVs sont connectés!")
     
     async def arm_and_takeoff_all(self):
-        """Armer et faire décoller tous les UAVs"""
+        """Faire décoller tous les UAVs"""
         print("\n" + "="*70)
         print("DÉCOLLAGE DE TOUS LES UAVs")
         print("="*70)
         
         # Armer et décoller en parallèle
-        takeoff_tasks = [bridge.arm_and_takeoff() for bridge in self.bridges]
-        await asyncio.gather(*takeoff_tasks)
+        tasks = []
+        for u in range(self.nUAVs):
+            tasks.append(asyncio.create_task(self.bridges[u].arm_and_takeoff()))
+        await asyncio.gather(*tasks)
         
         print("\n✓ Tous les UAVs sont en l'air!")
     
     async def start_offboard_all(self):
         """Démarrer le mode offboard pour tous les UAVs"""
         print("\nDémarrage du mode offboard pour tous les UAVs...")
-        
-        offboard_tasks = [bridge.start_offboard_mode() for bridge in self.bridges]
-        results = await asyncio.gather(*offboard_tasks)
+        tasks = []
+        for u in range(self.nUAVs):
+            tasks.append(asyncio.create_task(self.bridges[u].start_offboard_mode()))
+        results = await asyncio.gather(*tasks)
         
         success_count = sum(results)
         if success_count == self.nUAVs:
@@ -229,13 +275,13 @@ class MultiUAVController:
             print(f"⚠️  Mode offboard activé pour {success_count}/{self.nUAVs} UAVs")
             return False
     
-    async def update_all_from_simulation(self, FLT_track):
+    async def update_all_from_simulation(self, FLT_track, FLT_conditions):
         """Mettre à jour tous les UAVs avec l'état de simulation"""
         update_tasks = []
         for u in range(self.nUAVs):
             if u < len(self.bridges):
                 update_tasks.append(
-                    self.bridges[u].update_from_simulation_state(FLT_track[u])
+                    asyncio.create_task(self.bridges[u].update_from_simulation_state(FLT_track[u], FLT_conditions[u]))
                 )
         
         await asyncio.gather(*update_tasks)
@@ -245,9 +291,10 @@ class MultiUAVController:
         print("\n" + "="*70)
         print("ATTERRISSAGE DE TOUS LES UAVs")
         print("="*70)
-        
-        land_tasks = [bridge.return_and_land() for bridge in self.bridges]
-        await asyncio.gather(*land_tasks)
+        tasks = []
+        for u in range(self.nUAVs):
+            tasks.append(asyncio.create_task(self.bridges[u].return_and_land()))
+        await asyncio.gather(*tasks)
         
         print("\n✓ Tous les UAVs ont atterri!")
 
@@ -290,7 +337,7 @@ async def run_multi_uav_simulation():
     params['Z_lower_bound'] = 200.0
     params['Z_upper_bound'] = 1000.0
     params['current_simulation_time'] = 0.0
-    params['time_step'] = 1
+    params['time_step'] = 4
     params['bearing_step'] = 10
     params['speed_step'] = 10
     params['safe_distance'] = 30.0
@@ -339,67 +386,6 @@ async def run_multi_uav_simulation():
     
     print(f"\nInitialisation des {nUAVs} UAVs...")
     
-    for u in range(nUAVs):
-        # Initialiser les dictionnaires
-        FLT_track[u] = dict()
-        for keys in FLT_track_keys:
-            FLT_track[u][keys] = []
-        for keys in WPs_keys:
-            END_WPs[u][keys] = []
-            GOAL_WPs[u][keys] = []
-            EVAL_WPs[u][keys] = []
-        for keys in soar_keys:
-            SOAR_WPs[u][keys] = []
-        
-        FLT_conditions[u] = dict()
-        FLT_conditions[u]['airspeed'] = 13.0
-        FLT_conditions[u]['weight'] = 0.0
-        FLT_conditions[u]['flight_path_angle'] = 0.0
-        FLT_conditions[u]['grav_accel'] = grav_accel
-        FLT_conditions[u]['bank_angle'] = 0.0
-        FLT_conditions[u]['airspeed_dot'] = 0.0
-        FLT_conditions[u]['air_density'] = air_density
-        FLT_conditions[u]['battery_capacity'] = UAV_data['maximum_battery_capacity']
-        
-
-        FLT_track[u]['X'].append(np.random.uniform(params['X_lower_bound'], params['X_upper_bound'], 1)[0].tolist())
-        FLT_track[u]['Y'].append(np.random.uniform(params['Y_lower_bound'], params['Y_upper_bound'], 1)[0].tolist())
-        
-        END_WPs[u]['X'].append(np.random.uniform(params['X_lower_bound'], params['X_upper_bound'], 1)[0].tolist())
-        END_WPs[u]['Y'].append(np.random.uniform(params['Y_lower_bound'], params['Y_upper_bound'], 1)[0].tolist())
-        END_WPs[u]['Z'].append(400.0)
-        
-        # Position initiale
-        FLT_track[u]['X'].append(np.random.uniform(params['X_lower_bound'], params['X_upper_bound'], 1)[0].tolist())
-        FLT_track[u]['Y'].append(np.random.uniform(params['Y_lower_bound'], params['Y_upper_bound'], 1)[0].tolist())
-        FLT_track[u]['Z'].append(400.0)
-        FLT_track[u]['bearing'].append(0.0)
-        FLT_track[u]['battery_capacity'].append(UAV_data['maximum_battery_capacity'])
-        FLT_track[u]['flight_time'].append(0.0)
-        FLT_track[u]['flight_mode'].append('glide')
-        FLT_track[u]['in_evaluation'] = False
-        FLT_track[u]['current_thermal_id'] = None
-        FLT_track[u]['soaring_start_time'] = None
-        
-        # Génération de trajectoire
-        evaluator = TrajectoryEvaluator(params, UAV_data, FLT_conditions[u])
-        startPoint = dict()
-        startPoint['X'] = FLT_track[u]['X'][-1]
-        startPoint['Y'] = FLT_track[u]['Y'][-1]
-        startPoint['Z'] = FLT_track[u]['Z'][-1]
-        startPoint['bearing'] = FLT_track[u]['bearing'][-1]
-        
-        trajectoires = generate_all_trajectories(startPoint, END_WPs[u], params, UAV_data, obstacles)
-        optimal_trajectoires = evaluator.evaluate_trajectories(trajectoires)
-        GOAL_WPs[u]['X'] = optimal_trajectoires['X']
-        GOAL_WPs[u]['Y'] = optimal_trajectoires['Y']
-        GOAL_WPs[u]['Z'] = optimal_trajectoires['Z']
-    
-    
-    current_wp_indices = {u: 1 for u in range(nUAVs)}
-    current_eval_wp_indices = {u: 1 for u in range(nUAVs)}
-    current_soar_wp_indices = {u: 1 for u in range(nUAVs)}
-    
     # ========== CONNEXION MULTI-UAV PX4 ==========
     controller = MultiUAVController(nUAVs, params, UAV_data)
     
@@ -407,13 +393,86 @@ async def run_multi_uav_simulation():
         # Initialiser tous les UAVs
         await controller.initialize_all_uavs()
         
+        print("\nConfiguration de la trajectoire initiale pour chaque UAV...")
+        for u in range(nUAVs):
+            # Initialiser les dictionnaires
+            FLT_track[u] = dict()
+            for keys in FLT_track_keys:
+                FLT_track[u][keys] = []
+            for keys in WPs_keys:
+                END_WPs[u][keys] = []
+                GOAL_WPs[u][keys] = []
+                EVAL_WPs[u][keys] = []
+            for keys in soar_keys:
+                SOAR_WPs[u][keys] = []
+
+            FLT_conditions[u] = dict()
+            FLT_conditions[u]['airspeed'] = 13.0
+            FLT_conditions[u]['weight'] = 0.0
+            FLT_conditions[u]['flight_path_angle'] = 0.0
+            FLT_conditions[u]['grav_accel'] = grav_accel
+            FLT_conditions[u]['bank_angle'] = 0.0
+            FLT_conditions[u]['airspeed_dot'] = 0.0
+            FLT_conditions[u]['air_density'] = air_density
+            FLT_conditions[u]['battery_capacity'] = UAV_data['maximum_battery_capacity']
+
+
+            END_WPs[u]['X'].append(np.random.uniform(params['X_lower_bound'], params['X_upper_bound'], 1)[0].tolist())
+            END_WPs[u]['Y'].append(np.random.uniform(params['Y_lower_bound'], params['Y_upper_bound'], 1)[0].tolist())
+            END_WPs[u]['Z'].append(400.0)
+
+            # Position initiale en utilisant pymap3d
+            initial_lat = controller.bridges[u].home_position.latitude_deg
+            initial_lon = controller.bridges[u].home_position.longitude_deg
+            initial_alt = controller.bridges[u].simulation_origin['alt']
+            
+            # Convertir en coordonnées ENU locales par rapport à l'origine
+            lat0 = controller.bridges[u].simulation_origin['lat']
+            lon0 = controller.bridges[u].simulation_origin['lon']
+            h0 = controller.bridges[u].simulation_origin['alt']
+            
+            initial_x, initial_y, initial_z = pm.geodetic2enu(
+                initial_lat, initial_lon, initial_alt,
+                lat0, lon0, h0
+            )
+            
+            print(f"UAV {u} position initiale (E,N,U): ({initial_x:.1f}, {initial_y:.1f}, {initial_z:.1f})")
+            
+            FLT_track[u]['X'].append(initial_x)
+            FLT_track[u]['Y'].append(initial_y)
+            FLT_track[u]['Z'].append(400.0)
+            FLT_track[u]['bearing'].append(0.0)
+            FLT_track[u]['battery_capacity'].append(UAV_data['maximum_battery_capacity'])
+            FLT_track[u]['flight_time'].append(0.0)
+            FLT_track[u]['flight_mode'].append('glide')
+            FLT_track[u]['in_evaluation'] = False
+            FLT_track[u]['current_thermal_id'] = None
+            FLT_track[u]['soaring_start_time'] = None
+
+            # Génération de trajectoire
+            startPoint = dict()
+            startPoint['X'] = FLT_track[u]['X'][-1]
+            startPoint['Y'] = FLT_track[u]['Y'][-1]
+            startPoint['Z'] = FLT_track[u]['Z'][-1]
+            startPoint['bearing'] = FLT_track[u]['bearing'][-1]
+
+            straight_traj = StraightLineTrajectory(params, UAV_data)
+            straight = straight_traj.generate_path(startPoint, END_WPs[u])
+            optimal_trajectoires = fix_trajectory(straight, obstacles)
+            
+            GOAL_WPs[u]['X'] = optimal_trajectoires['X']
+            GOAL_WPs[u]['Y'] = optimal_trajectoires['Y']
+            GOAL_WPs[u]['Z'] = optimal_trajectoires['Z']
+    
+        current_wp_indices = {u: 1 for u in range(nUAVs)}
+        current_eval_wp_indices = {u: 1 for u in range(nUAVs)}
+        current_soar_wp_indices = {u: 1 for u in range(nUAVs)}
+        
         # Décoller tous les UAVs
         await controller.arm_and_takeoff_all()
         
         # Démarrer le mode offboard pour tous
-        if not await controller.start_offboard_all():
-            print("✗ Impossible de démarrer le mode offboard pour tous les UAVs")
-            return
+        await controller.start_offboard_all()
         
         print("\n" + "="*70)
         print("DÉBUT DE LA SIMULATION MULTI-UAV")
@@ -451,7 +510,7 @@ async def run_multi_uav_simulation():
             decision_calls += 1
             
             # Mise à jour PX4 pour tous les UAVs
-            await controller.update_all_from_simulation(FLT_track)
+            await controller.update_all_from_simulation(FLT_track, FLT_conditions)
             
             # Affichage périodique
             if iteration % 20 == 0:
@@ -466,17 +525,15 @@ async def run_multi_uav_simulation():
                         pos_str = f"({FLT_track[u]['X'][-1]:.0f}, {FLT_track[u]['Y'][-1]:.0f}, {FLT_track[u]['Z'][-1]:.0f})"
                         mode = FLT_track[u]['flight_mode'][-1]
                         battery = FLT_track[u]['battery_capacity'][-1]
+                        airspeed = FLT_conditions[u]['airspeed']
                         
-                        status = f"UAV {u}: {pos_str} | {mode} | Bat: {battery:.1f}"
+                        status = f"UAV {u}: {pos_str} | {mode} | V:{airspeed:.1f}m/s | Bat: {battery:.1f}"
                         
                         # Ajouter info thermique si applicable
                         if FLT_track[u]['current_thermal_id'] is not None:
                             status += f" | Therm: {FLT_track[u]['current_thermal_id']}"
                         
                         print(f"  {status}")
-            
-            # Synchronisation
-            await asyncio.sleep(1.0 / controller.bridges[0].update_rate)
         
         # ========== FIN DE SIMULATION ==========
         print("\n" + "="*70)

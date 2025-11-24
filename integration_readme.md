@@ -73,7 +73,8 @@ make px4_sitl gazebo_plane
 Terminal 2 - Votre simulation:
 ```bash
 cd votre_projet
-python3 example_px4_integrated.py
+source ./Mav/bin/activate
+python3 dronePx4.py
 ```
 
 Terminal 3 - QGroundControl (optionnel):

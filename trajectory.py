@@ -55,7 +55,7 @@ class StraightLineTrajectory(TrajectoryGenerator):
         Returns:
             dict: Points de trajectoire {X: [], Y: [], Z: []}
         """
-        num_points = self.params.get('num_points', 200)
+        num_points = self.params.get('num_points', 100)
         end_point = extract_waypoint(end_point)
         
         # Génération des points intermédiaires en ligne droite

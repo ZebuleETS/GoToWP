@@ -32,6 +32,13 @@ if [ ! -d "$PX4_DIR" ]; then
     echo "Clonez-le avec: git clone https://github.com/PX4/PX4-Autopilot.git --recursive"
     exit 1
 fi
+# Vérifier que MAVSDK existe
+MAVSDK_DIR="$HOME/MAVSDK"
+if [ ! -d "$MAVSDK_DIR" ]; then
+    echo -e "${RED}❌ MAVSDK non trouvé dans $MAVSDK_DIR${NC}"
+    echo "Clonez-le avec: git clone https://github.com/mavlink/MAVSDK.git"
+    exit 1
+fi
 
 # Nettoyer les processus précédents
 echo -e "${YELLOW}Nettoyage des processus existants...${NC}"
@@ -125,7 +132,7 @@ echo -e "==========================================${NC}"
 cd $PX4_DIR
 
 # Lancer Gazebo avec le premier drone
-DONT_RUN=1 make px4_sitl_default gazebo > $LOG_DIR/gazebo.log 2>&1 &
+xterm -hold -e make px4_sitl gz_rc_cessna && /bin/bash >> $LOG_DIR/gazebo.log 2>&1 &
 GAZEBO_PID=$!
 echo -e "${GREEN}✓ Gazebo lancé (PID: $GAZEBO_PID)${NC}"
 sleep 10
@@ -135,30 +142,38 @@ echo -e "\n${BLUE}=========================================="
 echo "Lancement des instances PX4"
 echo -e "==========================================${NC}"
 
-for ((i=0; i<$NUM_UAVS; i++)); do
+for ((i=1; i<$NUM_UAVS; i++)); do
     # Calculer les ports
     MAVLINK_UDP=$((14540 + i))
+    MAVSDK_PORT=$((50051 + i))
     INSTANCE=$i
     
     # Position de spawn
     SPAWN_X=$(echo "scale=1; ($i % 3) * 2" | bc)
     SPAWN_Y=$(echo "scale=1; ($i / 3) * 2" | bc)
+    SPAWN_Z=400
     
     echo -e "\n${BLUE}--- UAV $i ---${NC}"
     echo "Instance: $INSTANCE"
     echo "MAVLink UDP: $MAVLINK_UDP"
+    echo "MAVSDK Port: $MAVSDK_PORT"
     echo "Spawn position: ($SPAWN_X, $SPAWN_Y)"
+
+    cd $MAVSDK_DIR
+
+    # Lancer MAVSDK server pour cette instance
+    xterm -hold -e "./build/src/mavsdk_server/src/mavsdk_server udpin://0.0.0.0:$MAVLINK_UDP -p $MAVSDK_PORT"
     
     cd $PX4_DIR
     
     # Lancer PX4 pour cette instance
-    PX4_INSTANCE=$INSTANCE \
-    PX4_SIM_MODEL=plane \
-    PX4_SIMULATOR=gazebo \
+    xterm -hold -e PX4_GZ_STANDALONE=1 \
+    PX4_SYS_AUTOSTART=4003 \
+    PX4_GZ_MODEL_POSE="$SPAWN_X, $SPAWN_Y" \
+    PX4_SIM_MODEL=gz_rc_cessna \
     ./build/px4_sitl_default/bin/px4 \
-        -i $INSTANCE \
-        -d "$PX4_DIR/build/px4_sitl_default/etc" \
-        > $LOG_DIR/px4_uav_${i}.log 2>&1 &
+        -i $INSTANCE && /bin/bash \
+        >> $LOG_DIR/px4_uav_${i}.log 2>&1 &
     
     PID=$!
     PX4_PIDS[$i]=$PID
@@ -221,7 +236,7 @@ echo -e "${YELLOW}Appuyez sur Entrée pour lancer la simulation Python...${NC}"
 read
 
 # Lancer le script Python
-python3 example_px4_integrated.py
+python3 /home/pix4/GoToWP/dronePx4.py
 
 # Nettoyage final
 cleanup
