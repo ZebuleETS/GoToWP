@@ -16,6 +16,8 @@ from GoToWP import gotoWaypointMulti
 from compute import compute_distance_cartesian, geographic_to_cartesian, cartesian_to_geographic
 from trajectory import TrajectoryEvaluator, generate_all_trajectories, generate_random_obstacles, fix_trajectory, StraightLineTrajectory
 from thermal import ThermalGenerator, ThermalMap, ThermalEvaluator
+from Scenario import (TestScenario, PerformanceMetrics, SurveillanceObject, 
+                      ScenarioGenerator, PerformanceAnalyzer, select_scenario)
 
 
 class PX4SITLBridge:
@@ -36,10 +38,15 @@ class PX4SITLBridge:
         
         # Taux de mise à jour (Hz)
         self.update_rate = 10
+        
+        # Keepalive pour offboard
+        self.offboard_keepalive_task = None
+        self.last_position_ned = PositionNedYaw(0.0, 0.0, 0.0, 0.0)
+        self.last_velocity_ned = VelocityNedYaw(0.0, 0.0, 0.0, 0.0)
     
     async def connect(self):
         """Connexion à l'instance PX4 SITL"""
-        connection_string = f"udpin://0.0.0.0:{self.connection_port}"
+        connection_string = f"Mavsdk Server on port {self.mavsdk_port}"
         print(f"[UAV {self.uav_id}] Connexion sur {connection_string}...")
         
         self.drone = System(mavsdk_server_address="127.0.0.1", port=self.mavsdk_port)
@@ -87,9 +94,67 @@ class PX4SITLBridge:
         async for position in self.drone.telemetry.position():
             current_alt = position.relative_altitude_m
             print(f"[UAV {self.uav_id}] Altitude actuelle: {current_alt:.1f}m / {target_alt:.1f}m", end='\r')
-            if current_alt >= target_alt * 0.9:
+            if current_alt >= target_alt:
                 print(f"[UAV {self.uav_id}] ✓ Altitude atteinte: {current_alt:.1f}m")
                 break
+    
+    async def _offboard_keepalive_loop(self):
+        """
+        Boucle keepalive pour maintenir le mode offboard actif
+        Envoie des setpoints à 10Hz minimum
+        """
+        print(f"[UAV {self.uav_id}] Démarrage keepalive offboard...")
+        try:
+            while True:
+                await self.drone.offboard.set_position_velocity_ned(
+                    self.last_position_ned,
+                    self.last_velocity_ned
+                )
+                await asyncio.sleep(0.05)  # 20Hz pour la sécurité (minimum requis: 2Hz)
+        except asyncio.CancelledError:
+            print(f"[UAV {self.uav_id}] Arrêt keepalive offboard")
+        except Exception as e:
+            print(f"[UAV {self.uav_id}] Erreur keepalive: {e}")
+    
+    def _validate_command_values(self, north, east, down, yaw, vn, ve, vd):
+        """
+        Valider toutes les valeurs avant envoi à PX4
+        Retourne True si valide, False sinon
+        """
+        # Vérifier NaN et Inf
+        values = [north, east, down, yaw, vn, ve, vd]
+        if any(np.isnan(v) or np.isinf(v) for v in values):
+            print(f"[UAV {self.uav_id}] ⚠️  Valeurs invalides détectées (NaN/Inf):")
+            print(f"   Position NED: ({north:.2f}, {east:.2f}, {down:.2f})")
+            print(f"   Vitesse NED: ({vn:.2f}, {ve:.2f}, {vd:.2f})")
+            print(f"   Yaw: {yaw:.2f}°")
+            return False
+        
+        # Limites de sécurité pour les positions (m)
+        MAX_POSITION = 50000.0  # 50km
+        if abs(north) > MAX_POSITION or abs(east) > MAX_POSITION:
+            print(f"[UAV {self.uav_id}] ⚠️  Position hors limites: N={north:.0f}m, E={east:.0f}m")
+            return False
+        
+        # Limites d'altitude (m, down est négatif pour monter)
+        MAX_ALTITUDE_DOWN = -2000.0  # 2000m max altitude
+        MIN_ALTITUDE_DOWN = 5000.0   # Pas sous -5000m
+        if down < MAX_ALTITUDE_DOWN or down > MIN_ALTITUDE_DOWN:
+            print(f"[UAV {self.uav_id}] ⚠️  Altitude invalide: down={down:.0f}m (alt={-down:.0f}m)")
+            return False
+        
+        # Limites de vitesse (m/s)
+        MAX_VELOCITY = 50.0  # 50 m/s = 180 km/h
+        if abs(vn) > MAX_VELOCITY or abs(ve) > MAX_VELOCITY or abs(vd) > MAX_VELOCITY:
+            print(f"[UAV {self.uav_id}] ⚠️  Vitesse excessive: ({vn:.1f}, {ve:.1f}, {vd:.1f}) m/s")
+            return False
+        
+        # Yaw doit être dans [-180, 180] ou [0, 360]
+        if abs(yaw) > 360.0:
+            print(f"[UAV {self.uav_id}] ⚠️  Yaw invalide: {yaw:.1f}°")
+            return False
+        
+        return True
     
     async def update_from_simulation_state(self, FLT_track, FLT_conditions):
         """
@@ -103,6 +168,15 @@ class PX4SITLBridge:
         x_local = FLT_track['X'][-1]  # East
         y_local = FLT_track['Y'][-1]  # North
         z_local = FLT_track['Z'][-1]  # Up (altitude)
+        
+        # VALIDATION : Vérifier que les données de simulation sont valides
+        if np.isnan(x_local) or np.isnan(y_local) or np.isnan(z_local):
+            print(f"[UAV {self.uav_id}] ❌ Position simulation invalide: ({x_local}, {y_local}, {z_local})")
+            return  # Ne pas envoyer de commande invalide à PX4
+        
+        if np.isinf(x_local) or np.isinf(y_local) or np.isinf(z_local):
+            print(f"[UAV {self.uav_id}] ❌ Position simulation infinie: ({x_local}, {y_local}, {z_local})")
+            return
         
         # Origine de référence
         lat0 = self.simulation_origin['lat']
@@ -127,11 +201,28 @@ class PX4SITLBridge:
         
         # Orientation (bearing en radians)
         bearing_rad = FLT_track['bearing'][-1]
+        
+        # VALIDATION : Vérifier le bearing
+        if np.isnan(bearing_rad) or np.isinf(bearing_rad):
+            print(f"[UAV {self.uav_id}] ❌ Bearing invalide: {bearing_rad}")
+            return
+        
         yaw_deg = np.degrees(bearing_rad)
+        # Normaliser le yaw dans [0, 360[
+        yaw_deg = yaw_deg % 360.0
         
         # Vitesse aérodynamique
         airspeed = FLT_conditions['airspeed']
         flight_path_angle = FLT_conditions['flight_path_angle']
+        
+        # VALIDATION : Vérifier les vitesses
+        if np.isnan(airspeed) or np.isinf(airspeed) or airspeed < 0:
+            print(f"[UAV {self.uav_id}] ❌ Airspeed invalide: {airspeed}")
+            return
+        
+        if np.isnan(flight_path_angle) or np.isinf(flight_path_angle):
+            print(f"[UAV {self.uav_id}] ❌ Flight path angle invalide: {flight_path_angle}")
+            return
         
         # Calculer les composantes de vitesse dans le référentiel local (ENU)
         # Vitesse horizontale
@@ -148,22 +239,20 @@ class PX4SITLBridge:
         velocity_east_ned = velocity_east
         velocity_down_ned = -velocity_up  # Down = -Up
         
-        # Alternative: Convertir via ECEF si besoin de plus de précision
-        # Pour les vitesses, on peut aussi faire la transformation directe
-        # car c'est juste une rotation de coordonnées
+        # VALIDATION FINALE : Vérifier toutes les valeurs avant envoi à PX4
+        if not self._validate_command_values(
+            north_ned, east_ned, down_ned, yaw_deg,
+            velocity_north_ned, velocity_east_ned, velocity_down_ned
+        ):
+            print(f"[UAV {self.uav_id}] ⚠️  Commande rejetée - conservation dernière position valide")
+            return  # Ne pas mettre à jour avec des valeurs invalides
         
-        # Envoyer la commande combinée position + vitesse NED
-        await self.drone.offboard.set_position_velocity_ned(
-                PositionNedYaw(north_ned, east_ned, down_ned, yaw_deg),
-                VelocityNedYaw(velocity_north_ned, velocity_east_ned, velocity_down_ned, yaw_deg)
-            )
-        #try:
-        #    await self.drone.offboard.set_position_velocity_ned(
-        #        PositionNedYaw(north_ned, east_ned, down_ned, yaw_deg),
-        #        VelocityNedYaw(velocity_north_ned, velocity_east_ned, velocity_down_ned, yaw_deg)
-        #    )
-        #except Exception as e:
-        #    print(f"[UAV {self.uav_id}] Erreur set_position_velocity_ned: {e}")
+        # Stocker les dernières valeurs VALIDES pour le keepalive
+        self.last_position_ned = PositionNedYaw(north_ned, east_ned, down_ned, yaw_deg)
+        self.last_velocity_ned = VelocityNedYaw(velocity_north_ned, velocity_east_ned, velocity_down_ned, yaw_deg)
+        
+        # La commande est maintenant envoyée par la boucle keepalive
+        # pas besoin d'envoyer ici pour éviter les conflits
     
     async def start_offboard_mode(self):
         """Démarrer le mode offboard avec contrôle en vitesse"""
@@ -175,6 +264,10 @@ class PX4SITLBridge:
         try:
             await self.drone.offboard.start()
             print(f"[UAV {self.uav_id}] ✓ Mode offboard activé ")
+            
+            # Démarrer la boucle keepalive
+            self.offboard_keepalive_task = asyncio.create_task(self._offboard_keepalive_loop())
+            
             return True
         except OffboardError as error:
             print(f"[UAV {self.uav_id}] ✗ Erreur offboard: {error}")
@@ -182,6 +275,15 @@ class PX4SITLBridge:
     
     async def stop_offboard_mode(self):
         """Arrêter le mode offboard"""
+        # Arrêter la boucle keepalive
+        if self.offboard_keepalive_task:
+            self.offboard_keepalive_task.cancel()
+            try:
+                await self.offboard_keepalive_task
+            except asyncio.CancelledError:
+                pass
+            self.offboard_keepalive_task = None
+        
         try:
             await self.drone.offboard.stop()
         except:
@@ -297,21 +399,38 @@ class MultiUAVController:
         await asyncio.gather(*tasks)
         
         print("\n✓ Tous les UAVs ont atterri!")
+        
+    async def set_altitude_all(self, target_altitude):
+        """Définir l'altitude cible pour tous les UAVs"""
+        print(f"\nDéfinition de l'altitude cible à {target_altitude}m pour tous les UAVs...")
+        tasks = []
+        for u in range(self.nUAVs):
+            tasks.append(asyncio.create_task(self.bridges[u].drone.action.do_orbit(
+                100,15,3,self.bridges[u].home_position.latitude_deg, self.bridges[u].home_position.longitude_deg, target_altitude
+            )))
+        await asyncio.gather(*tasks)
+        print(f"\n✓ Altitude cible définie à {target_altitude}m pour tous les UAVs!")
 
 
 async def run_multi_uav_simulation():
     """
     Fonction principale pour simulation multi-UAV avec PX4
+    Inclut tous les scénarios de test
     """
     print("="*70)
     print("SIMULATION MULTI-UAV PLANEUR AVEC THERMIQUES - PX4 SITL")
+    print("TESTS DE PERFORMANCE")
     print("="*70)
     
-    # ========== PARAMÈTRES ==========
-    nUAVs = int(input("\nNombre d'UAVs à simuler (1-10): ") or "3")
-    nUAVs = max(1, min(10, nUAVs))  # Limiter entre 1 et 10
+    # ========== SÉLECTION SCÉNARIO ==========
+    scenario = select_scenario()
     
-    print(f"\n✓ Configuration pour {nUAVs} UAVs")
+    # ========== PARAMÈTRES ==========
+    nUAVs = int(input("\nNombre d'UAVs à simuler (1-3): ") or "3")
+    nUAVs = max(1, min(3, nUAVs))
+    
+    print(f"\n✓ Configuration: {scenario.value} avec {nUAVs} UAVs")
+    print("\n⏳ Connexion aux drones pour obtenir les positions home...")
     
     UAV_data = dict()
     UAV_data['maximum_battery_capacity'] = 10.0
@@ -337,63 +456,200 @@ async def run_multi_uav_simulation():
     params['Z_lower_bound'] = 200.0
     params['Z_upper_bound'] = 1000.0
     params['current_simulation_time'] = 0.0
-    params['time_step'] = 4
-    params['bearing_step'] = 10
-    params['speed_step'] = 10
+    params['time_step'] = 0.5  # Time step cible pour synchronisation temps réel (secondes)
+    params['target_real_time_per_iteration'] = 0.5  # Temps réel cible par itération
+    params['bearing_step'] = 5  # Réduit de 10 à 5 pour accélérer (50% moins de calculs)
+    params['speed_step'] = 3  # Réduit de 10 à 3 pour accélérer (70% moins de calculs)
     params['safe_distance'] = 30.0
     params['horizon_length'] = 100.0
+    params['adaptive_resolution'] = True  # Ajuster automatiquement la résolution si trop lent
     
-    # Génération d'obstacles
-    obstacles = generate_random_obstacles(5, params)
-    params['obstacles'] = obstacles
-    print(f"✓ {len(obstacles)} obstacles générés")
-    
-    # ========== THERMIQUES ==========
-    thermal_map = ThermalMap()
-    thermal_generator = ThermalGenerator(params)
-    thermal_evaluator = ThermalEvaluator(params, UAV_data)
-    
-    # Générer plus de thermiques pour multi-UAV
-    num_thermals = max(3, nUAVs)
-    active_thermals = thermal_generator.generate_random_thermals(
-        num_thermals, obstacles, params['current_simulation_time']
+    # Initialiser métriques de performance
+    metrics = PerformanceMetrics(
+        scenario_name=scenario.value,
+        num_uavs=nUAVs
     )
-    print(f'✓ {len(active_thermals)} thermiques actives')
     
-    # ========== CALCULS ATMOSPHÉRIQUES ==========
-    ACC_SEA_LEVEL = 9.80665
-    T_SEA_LEVEL = 288.15
-    RHO_SEA_LEVEL = 1.225
-    MEAN_EARTH_RADIUS = 6371009
-    TROPO_LAPSE_RATE = -0.0065
-    R = 287.058
-    
-    grav_accel = ACC_SEA_LEVEL * (MEAN_EARTH_RADIUS / (MEAN_EARTH_RADIUS + params['working_floor']))
-    T_fin = T_SEA_LEVEL + TROPO_LAPSE_RATE * params['working_floor']
-    air_density = RHO_SEA_LEVEL * (T_fin / T_SEA_LEVEL)**(-grav_accel / (TROPO_LAPSE_RATE * R) - 1)
-    
-    # ========== INITIALISATION UAVs ==========
-    FLT_track = {k: {} for k in range(nUAVs)}
-    FLT_track_keys = ['X', 'Y', 'Z', 'bearing', 'battery_capacity', 'flight_time', 
-                      'flight_mode', 'in_evaluation', 'current_thermal_id', 'soaring_start_time']
-    FLT_conditions = {k: {} for k in range(nUAVs)}
-    END_WPs = {k: {} for k in range(nUAVs)}
-    WPs_keys = ['X', 'Y', 'Z']
-    soar_keys = ['X', 'Y', 'Z', 'bearing', 'flight_path_angle', 'bank_angle']
-    GOAL_WPs = {k: {} for k in range(nUAVs)}
-    EVAL_WPs = {k: {} for k in range(nUAVs)}
-    SOAR_WPs = {k: {} for k in range(nUAVs)}
-    
-    print(f"\nInitialisation des {nUAVs} UAVs...")
-    
-    # ========== CONNEXION MULTI-UAV PX4 ==========
+    # ========== CONNEXION MULTI-UAV PX4 POUR OBTENIR LES POSITIONS HOME ==========
     controller = MultiUAVController(nUAVs, params, UAV_data)
     
     try:
-        # Initialiser tous les UAVs
+        # Initialiser tous les UAVs d'abord pour obtenir leurs positions home
         await controller.initialize_all_uavs()
         
-        print("\nConfiguration de la trajectoire initiale pour chaque UAV...")
+        # Calculer le centre des positions home pour l'origine des scénarios
+        home_positions = []
+        for u in range(nUAVs):
+            lat0 = controller.bridges[0].simulation_origin['lat']
+            lon0 = controller.bridges[0].simulation_origin['lon']
+            h0 = controller.bridges[0].simulation_origin['alt']
+            
+            lat = controller.bridges[u].home_position.latitude_deg
+            lon = controller.bridges[u].home_position.longitude_deg
+            alt = controller.bridges[u].home_position.absolute_altitude_m
+            
+            # Convertir en ENU local
+            x, y, z = pm.geodetic2enu(lat, lon, alt, lat0, lon0, h0)
+            home_positions.append({'X': x, 'Y': y, 'Z': z, 'bearing': 0.0})
+        
+        print(f"\n✓ Positions home récupérées pour {nUAVs} UAVs")
+        for u, pos in enumerate(home_positions):
+            print(f"  UAV {u}: ({pos['X']:.1f}, {pos['Y']:.1f}, {pos['Z']:.1f})")
+        
+        # Calculer le centroïde
+        center_x = 3000.0
+        center_y = 3000.0
+        center_z = 400.0  # 400m au-dessus
+        
+        # ========== GÉNÉRATION SCÉNARIO BASÉE SUR LES POSITIONS HOME ==========
+        scenario_gen = ScenarioGenerator()
+        surveillance_objects = None
+        
+        if scenario == TestScenario.PRELIMINARY_COLLISION:
+            # Les drones partent de leurs positions home et convergent vers le centre
+            start_positions = {u: home_positions[u] for u in range(nUAVs)}
+            end_position = {'X': center_x, 'Y': center_y, 'Z': center_z}
+            obstacles = generate_random_obstacles(3, params)
+            params['obstacles'] = obstacles
+            allow_glide = True
+            active_thermals = []
+            print(f"\n✓ Scénario collision: convergence vers ({center_x:.0f}, {center_y:.0f}, {center_z:.0f})")
+            
+        elif scenario == TestScenario.TRAJECTORY_OPTIMAL_POWERED:
+            # Positions de départ = positions home, destination éloignée
+            start_positions = {u: home_positions[u] for u in range(nUAVs)}
+            end_position = {
+                'X': center_x + 1000.0,
+                'Y': center_y + 1000.0,
+                'Z': center_z
+            }
+            obstacles = generate_random_obstacles(5, params)
+            params['obstacles'] = obstacles
+            allow_glide = False
+            active_thermals = []
+            print(f"\n✓ Scénario trajectoire optimale (motorisé) vers ({end_position['X']:.0f}, {end_position['Y']:.0f})")
+            
+        elif scenario == TestScenario.TRAJECTORY_OPTIMAL_GLIDE:
+            # Positions de départ = positions home, destination éloignée avec planage
+            start_positions = {u: home_positions[u] for u in range(nUAVs)}
+            end_position = {
+                'X': center_x + 1500.0,
+                'Y': center_y + 1500.0,
+                'Z': center_z
+            }
+            obstacles = generate_random_obstacles(5, params)
+            params['obstacles'] = obstacles
+            allow_glide = True
+            active_thermals = []
+            print(f"\n✓ Scénario trajectoire optimale (planeur) vers ({end_position['X']:.0f}, {end_position['Y']:.0f})")
+            
+        elif scenario == TestScenario.ENDURANCE:
+            # Positions de départ = positions home réelles des UAVs
+            thermal_generator = ThermalGenerator(params)
+            obstacles = generate_random_obstacles(3, params)
+            params['obstacles'] = obstacles
+            active_thermals, thermal_stats = scenario_gen.generate_endurance_scenario(nUAVs, params, thermal_generator, obstacles)
+            metrics.thermals_generated = len(active_thermals)
+            allow_glide = True
+            # Utiliser les positions home réelles avec bearing vers le centre
+            start_positions = {}
+            for u in range(nUAVs):
+                # Calculer le bearing vers le centre depuis la position home
+                dx = center_x - home_positions[u]['X']
+                dy = center_y - home_positions[u]['Y']
+                bearing_to_center = np.arctan2(dx, dy)
+                
+                start_positions[u] = {
+                    'X': home_positions[u]['X'],
+                    'Y': home_positions[u]['Y'],
+                    'Z': home_positions[u]['Z'] + 400.0,  # 400m au-dessus de home
+                    'bearing': bearing_to_center
+                }
+            end_position = {'X': center_x, 'Y': center_y, 'Z': center_z}
+            print(f"\n✓ Scénario endurance: {len(active_thermals)} thermiques, départ des positions home")
+        
+        elif scenario == TestScenario.COVERAGE:
+            # Positions de départ = positions home réelles des UAVs
+            mission_duration = 1200  # 20 minutes
+            surveillance_objects = scenario_gen.generate_coverage_scenario(nUAVs, params, mission_duration)
+            metrics.objects_total = len(surveillance_objects)
+            obstacles = generate_random_obstacles(5, params)
+            params['obstacles'] = obstacles
+            allow_glide = True
+            active_thermals = dict()
+            # Utiliser les positions home réelles avec bearing vers la zone de couverture
+            start_positions = {}
+            target_x = center_x + 2500.0
+            target_y = center_y + 2500.0
+            for u in range(nUAVs):
+                # Calculer le bearing vers la zone de couverture depuis la position home
+                dx = target_x - home_positions[u]['X']
+                dy = target_y - home_positions[u]['Y']
+                bearing_to_target = np.arctan2(dx, dy)
+                
+                start_positions[u] = {
+                    'X': home_positions[u]['X'],
+                    'Y': home_positions[u]['Y'],
+                    'Z': home_positions[u]['Z'] + 400.0,  # 400m au-dessus de home
+                    'bearing': bearing_to_target
+                }
+            end_position = {'X': target_x, 'Y': target_y, 'Z': center_z}
+            print(f"\n✓ Scénario couverture: {len(surveillance_objects)} objets, départ des positions home")
+        
+        # ========== THERMIQUES (si nécessaire) ==========
+        if scenario != TestScenario.ENDURANCE and allow_glide and scenario not in [TestScenario.PRELIMINARY_COLLISION, TestScenario.TRAJECTORY_OPTIMAL_POWERED, TestScenario.TRAJECTORY_OPTIMAL_GLIDE]:
+            thermal_map = ThermalMap()
+            thermal_generator = ThermalGenerator(params)
+            thermal_evaluator = ThermalEvaluator(params, UAV_data)
+            num_thermals = max(3, nUAVs // 2)
+            active_thermals = thermal_generator.generate_random_thermals(
+                num_thermals, obstacles, params['current_simulation_time']
+            )
+            print(f'✓ {len(active_thermals)} thermiques actives')
+        elif scenario == TestScenario.ENDURANCE:
+            thermal_map = ThermalMap()
+            thermal_evaluator = ThermalEvaluator(params, UAV_data)
+        elif allow_glide:
+            # Pour les scénarios de trajectoire avec planeur, ajouter quelques thermiques
+            thermal_map = ThermalMap()
+            thermal_generator = ThermalGenerator(params)
+            thermal_evaluator = ThermalEvaluator(params, UAV_data)
+            num_thermals = max(2, nUAVs // 3)
+            active_thermals = thermal_generator.generate_random_thermals(
+                num_thermals, obstacles, params['current_simulation_time']
+            )
+            print(f'✓ {len(active_thermals)} thermiques actives')
+        else:
+            thermal_map = None
+            thermal_evaluator = None
+        
+        # ========== CALCULS ATMOSPHÉRIQUES ==========
+        ACC_SEA_LEVEL = 9.80665
+        T_SEA_LEVEL = 288.15
+        RHO_SEA_LEVEL = 1.225
+        MEAN_EARTH_RADIUS = 6371009
+        TROPO_LAPSE_RATE = -0.0065
+        R = 287.058
+        
+        grav_accel = ACC_SEA_LEVEL * (MEAN_EARTH_RADIUS / (MEAN_EARTH_RADIUS + params['working_floor']))
+        T_fin = T_SEA_LEVEL + TROPO_LAPSE_RATE * params['working_floor']
+        air_density = RHO_SEA_LEVEL * (T_fin / T_SEA_LEVEL)**(-grav_accel / (TROPO_LAPSE_RATE * R) - 1)
+        
+        # ========== INITIALISATION UAVs ==========
+        FLT_track = {k: {} for k in range(nUAVs)}
+        FLT_track_keys = ['X', 'Y', 'Z', 'bearing', 'battery_capacity', 'flight_time', 
+                          'flight_mode', 'in_evaluation', 'current_thermal_id', 'soaring_start_time']
+        FLT_conditions = {k: {} for k in range(nUAVs)}
+        END_WPs = {k: {} for k in range(nUAVs)}
+        WPs_keys = ['X', 'Y', 'Z']
+        soar_keys = ['X', 'Y', 'Z', 'bearing', 'flight_path_angle', 'bank_angle']
+        GOAL_WPs = {k: {} for k in range(nUAVs)}
+        EVAL_WPs = {k: {} for k in range(nUAVs)}
+        SOAR_WPs = {k: {} for k in range(nUAVs)}
+        
+        print(f"\nInitialisation des trajectoires pour {nUAVs} UAVs...")
+        
+        # Initialiser tous les dictionnaires pour tous les UAVs
         for u in range(nUAVs):
             # Initialiser les dictionnaires
             FLT_track[u] = dict()
@@ -416,54 +672,69 @@ async def run_multi_uav_simulation():
             FLT_conditions[u]['air_density'] = air_density
             FLT_conditions[u]['battery_capacity'] = UAV_data['maximum_battery_capacity']
 
+            END_WPs[u]['X'].append(end_position['X'])
+            END_WPs[u]['Y'].append(end_position['Y'])
+            END_WPs[u]['Z'].append(end_position['Z'])
 
-            END_WPs[u]['X'].append(np.random.uniform(params['X_lower_bound'], params['X_upper_bound'], 1)[0].tolist())
-            END_WPs[u]['Y'].append(np.random.uniform(params['Y_lower_bound'], params['Y_upper_bound'], 1)[0].tolist())
-            END_WPs[u]['Z'].append(400.0)
-
-            # Position initiale en utilisant pymap3d
-            initial_lat = controller.bridges[u].home_position.latitude_deg
-            initial_lon = controller.bridges[u].home_position.longitude_deg
-            initial_alt = controller.bridges[u].simulation_origin['alt']
-            
-            # Convertir en coordonnées ENU locales par rapport à l'origine
-            lat0 = controller.bridges[u].simulation_origin['lat']
-            lon0 = controller.bridges[u].simulation_origin['lon']
-            h0 = controller.bridges[u].simulation_origin['alt']
-            
-            initial_x, initial_y, initial_z = pm.geodetic2enu(
-                initial_lat, initial_lon, initial_alt,
-                lat0, lon0, h0
-            )
-            
-            print(f"UAV {u} position initiale (E,N,U): ({initial_x:.1f}, {initial_y:.1f}, {initial_z:.1f})")
+            # Utiliser les positions de départ du scénario (basées sur home positions)
+            initial_x = start_positions[u]['X']
+            initial_y = start_positions[u]['Y']
+            initial_z = start_positions[u]['Z']
+            initial_bearing = start_positions[u]['bearing']
+            print(f"UAV {u} départ (E,N,U): ({initial_x:.1f}, {initial_y:.1f}, {initial_z:.1f}) cap: {np.degrees(initial_bearing):.0f}°")
             
             FLT_track[u]['X'].append(initial_x)
             FLT_track[u]['Y'].append(initial_y)
-            FLT_track[u]['Z'].append(400.0)
-            FLT_track[u]['bearing'].append(0.0)
+            FLT_track[u]['Z'].append(initial_z)
+            FLT_track[u]['bearing'].append(initial_bearing)
             FLT_track[u]['battery_capacity'].append(UAV_data['maximum_battery_capacity'])
             FLT_track[u]['flight_time'].append(0.0)
-            FLT_track[u]['flight_mode'].append('glide')
+            FLT_track[u]['flight_mode'].append('glide' if allow_glide else 'powered')
             FLT_track[u]['in_evaluation'] = False
             FLT_track[u]['current_thermal_id'] = None
             FLT_track[u]['soaring_start_time'] = None
 
-            # Génération de trajectoire
+        # Fonction pour générer et évaluer la trajectoire d'un UAV
+        async def generate_trajectory_for_uav(u):
+            """Génération et évaluation de trajectoire pour un UAV"""
             startPoint = dict()
             startPoint['X'] = FLT_track[u]['X'][-1]
             startPoint['Y'] = FLT_track[u]['Y'][-1]
             startPoint['Z'] = FLT_track[u]['Z'][-1]
             startPoint['bearing'] = FLT_track[u]['bearing'][-1]
-
-            straight_traj = StraightLineTrajectory(params, UAV_data)
-            straight = straight_traj.generate_path(startPoint, END_WPs[u])
-            optimal_trajectoires = fix_trajectory(straight, obstacles)
+            
+            # Exécuter dans un thread pour ne pas bloquer
+            loop = asyncio.get_event_loop()
+            
+            def compute_trajectory():
+                evaluator = TrajectoryEvaluator(params, UAV_data, FLT_conditions[u])
+                trajectoires = generate_all_trajectories(startPoint, END_WPs[u], params, UAV_data, obstacles)
+                optimal_trajectoires = evaluator.evaluate_trajectories(trajectoires)
+                return optimal_trajectoires
+            
+            # Exécuter en parallèle dans un executor pour ne pas bloquer la boucle asyncio
+            optimal_trajectoires = await loop.run_in_executor(None, compute_trajectory)
             
             GOAL_WPs[u]['X'] = optimal_trajectoires['X']
             GOAL_WPs[u]['Y'] = optimal_trajectoires['Y']
             GOAL_WPs[u]['Z'] = optimal_trajectoires['Z']
-    
+            
+            return u
+        
+        # Générer toutes les trajectoires en parallèle
+        print("\n⚡ Génération des trajectoires en parallèle...")
+        traj_start = time.perf_counter()
+        
+        trajectory_tasks = [generate_trajectory_for_uav(u) for u in range(nUAVs)]
+        completed_uavs = await asyncio.gather(*trajectory_tasks)
+        
+        traj_end = time.perf_counter()
+        traj_time = traj_end - traj_start
+        
+        print(f"✓ Trajectoires générées pour {len(completed_uavs)} UAVs en {traj_time:.2f}s")
+        for u in completed_uavs:
+            print(f"  UAV {u}: {len(GOAL_WPs[u]['X'])} waypoints")
+        
         current_wp_indices = {u: 1 for u in range(nUAVs)}
         current_eval_wp_indices = {u: 1 for u in range(nUAVs)}
         current_soar_wp_indices = {u: 1 for u in range(nUAVs)}
@@ -471,19 +742,34 @@ async def run_multi_uav_simulation():
         # Décoller tous les UAVs
         await controller.arm_and_takeoff_all()
         
+        #await controller.set_altitude_all(400.0)
+        
         # Démarrer le mode offboard pour tous
         await controller.start_offboard_all()
         
         print("\n" + "="*70)
-        print("DÉBUT DE LA SIMULATION MULTI-UAV")
+        print(f"DÉBUT DE LA SIMULATION - {scenario.value}")
         print("="*70)
         
         # ========== BOUCLE PRINCIPALE ==========
         iteration = 0
-        max_iterations = 2000
+        max_iterations = 3000 if scenario == TestScenario.COVERAGE else 2000
         
         total_decision_time = 0
         decision_calls = 0
+        
+        # Horloge temps réel (pour statistiques seulement)
+        real_time_start = time.perf_counter()
+        
+        # Champ de vision pour détection d'objets
+        fov_radius = 150.0
+        
+        print(f"\n⚙️  Configuration temps réel:")
+        print(f"   Time step cible: {params['time_step']:.2f}s")
+        print(f"   Bearing steps: {params['bearing_step']} (optimisé pour temps réel)")
+        print(f"   Speed steps: {params['speed_step']} (optimisé pour temps réel)")
+        print(f"   Résolution adaptive: {'Activée' if params['adaptive_resolution'] else 'Désactivée'}")
+        print("   → Objectif: calcul en ~{:.0f}ms pour réactivité maximale\n".format(params['target_real_time_per_iteration']*1000))
         
         while iteration < max_iterations:
             # Vérifier si tous les UAVs ont terminé
@@ -491,38 +777,109 @@ async def run_multi_uav_simulation():
                 print("\n✓ Tous les UAVs ont atteint leurs objectifs!")
                 break
             
-            params['current_simulation_time'] += params['time_step']
-            current_time = params['current_simulation_time']
-            iteration += 1
-            
-            # Mesurer le temps de décision
-            start_time = time.perf_counter()
+            # Mesurer le temps de décision de l'algorithme
+            algo_start_time = time.perf_counter()
             
             # Mise à jour de la simulation
-            FLT_track, FLT_conditions, current_wp_indices, current_eval_wp_indices, SOAR_WPs, current_soar_wp_indices = gotoWaypointMulti(
-                FLT_track, FLT_conditions, GOAL_WPs, nUAVs, params, UAV_data,
-                current_wp_indices, current_eval_wp_indices, current_soar_wp_indices, 
-                thermal_map, thermal_evaluator, EVAL_WPs, active_thermals, SOAR_WPs
-            )
+            if thermal_map and thermal_evaluator:
+                FLT_track, FLT_conditions, current_wp_indices, current_eval_wp_indices, SOAR_WPs, current_soar_wp_indices = gotoWaypointMulti(
+                    FLT_track, FLT_conditions, GOAL_WPs, nUAVs, params, UAV_data,
+                    current_wp_indices, current_eval_wp_indices, current_soar_wp_indices, 
+                    thermal_map, thermal_evaluator, EVAL_WPs, active_thermals, SOAR_WPs
+                )
+            else:
+                # Version simplifiée sans thermiques
+                FLT_track, FLT_conditions, current_wp_indices, current_eval_wp_indices, SOAR_WPs, current_soar_wp_indices = gotoWaypointMulti(
+                    FLT_track, FLT_conditions, GOAL_WPs, nUAVs, params, UAV_data,
+                    current_wp_indices, current_eval_wp_indices, current_soar_wp_indices, 
+                    None, None, EVAL_WPs, [], SOAR_WPs
+                )
             
-            end_time = time.perf_counter()
-            total_decision_time += (end_time - start_time)
+            algo_end_time = time.perf_counter()
+            algo_execution_time = algo_end_time - algo_start_time
+            
+            total_decision_time += algo_execution_time
             decision_calls += 1
+            
+            # SYNCHRONISATION TEMPS RÉEL INTELLIGENTE
+            # Si le calcul est trop lent, réduire la résolution adaptativement
+            if params['adaptive_resolution'] and algo_execution_time > params['target_real_time_per_iteration'] * 2:
+                if params['bearing_step'] > 3:
+                    params['bearing_step'] = max(3, params['bearing_step'] - 1)
+                    print(f"⚠️  Calcul trop lent ({algo_execution_time:.2f}s) - Réduction bearing_step à {params['bearing_step']}")
+                if params['speed_step'] > 2:
+                    params['speed_step'] = max(2, params['speed_step'] - 1)
+                    print(f"⚠️  Calcul trop lent - Réduction speed_step à {params['speed_step']}")
+            
+            # Mettre à jour le temps de simulation
+            params['current_simulation_time'] += params['time_step']
+            current_time = params['current_simulation_time']
+            
+            # Attendre pour synchroniser avec le temps réel si le calcul est trop rapide
+            time_to_wait = params['target_real_time_per_iteration'] - algo_execution_time
+            if time_to_wait > 0:
+                await asyncio.sleep(time_to_wait)
+            
+            # Détection d'objets pour scénario couverture
+            if scenario == TestScenario.COVERAGE and surveillance_objects:
+                for obj in surveillance_objects:
+                    if obj.is_active(current_time) and not obj.detected:
+                        for u in range(nUAVs):
+                            if len(FLT_track[u]['X']) > 0:
+                                if obj.is_in_fov(FLT_track[u]['X'][-1], 
+                                               FLT_track[u]['Y'][-1],
+                                               FLT_track[u]['Z'][-1],
+                                               fov_radius):
+                                    if not obj.detected:
+                                        obj.detected = True
+                                    if u not in obj.detected_by:
+                                        obj.detected_by.append(u)
+            
+            iteration += 1
             
             # Mise à jour PX4 pour tous les UAVs
             await controller.update_all_from_simulation(FLT_track, FLT_conditions)
             
             # Affichage périodique
-            if iteration % 20 == 0:
-                avg_time = (total_decision_time / decision_calls) * 1000
+            if iteration % 5 == 0:
+                current_real_time = time.perf_counter()
+                total_real_time = current_real_time - real_time_start
+                avg_algo_time = (total_decision_time / decision_calls) * 1000
+                
+                # Calculer le décalage de synchronisation
+                ideal_real_time = params['current_simulation_time']  # Idéalement 1:1
+                sync_ratio = params['current_simulation_time'] / total_real_time if total_real_time > 0 else 0
+                sync_delay = total_real_time - params['current_simulation_time']
+                
+                # Qualité de synchronisation
+                if 0.95 <= sync_ratio <= 1.05:
+                    sync_status = "✅ EXCELLENT"
+                elif 0.8 <= sync_ratio <= 1.2:
+                    sync_status = "✓ BON"
+                elif 0.5 <= sync_ratio <= 2.0:
+                    sync_status = "⚠️  MOYEN"
+                else:
+                    sync_status = "❌ MAUVAIS"
                 
                 print(f"\n{'='*70}")
-                print(f"[t={current_time:.1f}s | iter={iteration}] Temps décision: {avg_time:.2f}ms")
+                print(f"[Simulation: {current_time:.1f}s | Réel: {total_real_time:.1f}s | Iter: {iteration}]")
+                print(f"  Temps calcul: {avg_algo_time:.1f}ms (objectif: {params['target_real_time_per_iteration']*1000:.0f}ms)")
+                print(f"  Sync temps réel: {sync_ratio:.2f}x {sync_status}")
+                print(f"  Décalage: {sync_delay:+.2f}s | Steps: B={params['bearing_step']}, V={params['speed_step']}")
                 print(f"{'='*70}")
                 
                 for u in range(nUAVs):
                     if len(FLT_track[u]['X']) > 0:
-                        pos_str = f"({FLT_track[u]['X'][-1]:.0f}, {FLT_track[u]['Y'][-1]:.0f}, {FLT_track[u]['Z'][-1]:.0f})"
+                        # Vérifier les NaN
+                        x = FLT_track[u]['X'][-1]
+                        y = FLT_track[u]['Y'][-1]
+                        z = FLT_track[u]['Z'][-1]
+                        
+                        if np.isnan(x) or np.isnan(y) or np.isnan(z):
+                            print(f"  UAV {u}: ⚠️  ERREUR - Position invalide (NaN)")
+                            continue
+                        
+                        pos_str = f"({x:.0f}, {y:.0f}, {z:.0f})"
                         mode = FLT_track[u]['flight_mode'][-1]
                         battery = FLT_track[u]['battery_capacity'][-1]
                         airspeed = FLT_conditions[u]['airspeed']
@@ -536,11 +893,65 @@ async def run_multi_uav_simulation():
                         print(f"  {status}")
         
         # ========== FIN DE SIMULATION ==========
+        total_real_time_final = time.perf_counter() - real_time_start
+        
         print("\n" + "="*70)
         print("FIN DE LA SIMULATION MULTI-UAV")
         print("="*70)
-        print(f"Temps total: {params['current_simulation_time']:.1f}s")
+        print(f"Temps simulé: {params['current_simulation_time']:.1f}s")
+        print(f"Temps réel: {total_real_time_final:.1f}s")
+        print(f"Ratio: {params['current_simulation_time']/total_real_time_final:.2f}x")
         print(f"Itérations: {iteration}")
+        print(f"Time step moyen: {params['current_simulation_time']/iteration:.2f}s")
+        
+        # ========== ANALYSE DES PERFORMANCES ==========
+        analyzer = PerformanceAnalyzer()
+        
+        # Calculer les métriques de trajectoire
+        path_metrics = analyzer.calculate_path_metrics(FLT_track, nUAVs)
+        for u in range(nUAVs):
+            metrics.total_distance[u] = path_metrics[u]['distance']
+            metrics.path_length[u] = path_metrics[u]['waypoints']
+        
+        # Calculer les métriques de temps
+        phase_times = analyzer.calculate_flight_phase_times(FLT_track, nUAVs)
+        for u in range(nUAVs):
+            metrics.total_flight_time[u] = phase_times[u]['total']
+            metrics.glide_time[u] = phase_times[u]['glide']
+            metrics.soar_time[u] = phase_times[u]['soar']
+            metrics.powered_time[u] = phase_times[u]['powered']
+        
+        # Calculer la distance minimale de séparation
+        metrics.min_separation_distance = analyzer.check_min_separation(FLT_track, nUAVs)
+        
+        # Calculer les métriques de batterie
+        for u in range(nUAVs):
+            if len(FLT_track[u]['battery_capacity']) > 0:
+                metrics.battery_remaining[u] = FLT_track[u]['battery_capacity'][-1]
+                metrics.battery_consumed[u] = UAV_data['maximum_battery_capacity'] - metrics.battery_remaining[u]
+        
+        # Analyser les thermiques pour le scénario d'endurance
+        if scenario == TestScenario.ENDURANCE and len(active_thermals) > 0:
+            thermal_analysis = analyzer.analyze_thermal_exploitation(active_thermals, FLT_track, nUAVs)
+            metrics.thermals_detected = thermal_analysis['detected']
+            metrics.thermals_exploited = thermal_analysis['exploited']
+            metrics.thermals_rejected = thermal_analysis['rejected']
+            metrics.thermals_per_uav = thermal_analysis['per_uav']
+        
+        # Analyser la couverture pour le scénario de couverture
+        if scenario == TestScenario.COVERAGE and surveillance_objects:
+            coverage_analysis = analyzer.analyze_coverage(surveillance_objects, FLT_track, nUAVs, fov_radius)
+            metrics.objects_detected = coverage_analysis['detected']
+            metrics.detection_rate = coverage_analysis['detection_rate']
+            metrics.objects_per_uav = coverage_analysis['per_uav']
+        
+        # Afficher le rapport de performance
+        analyzer.print_performance_report(metrics)
+        
+        # Sauvegarder les métriques
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        filename = f"metrics_{scenario.value}_{nUAVs}uavs_{timestamp}.json"
+        analyzer.save_metrics_to_file(metrics, filename)
         
         # Statistiques par UAV
         print("\nStatistiques par UAV:")

@@ -3,11 +3,11 @@
 import numpy as np
 from GoToWP import gotoWaypointMulti
 from compute import compute_distance_cartesian
-from trajectory import TrajectoryEvaluator, generate_all_trajectories, generate_random_obstacles
+from trajectory import TrajectoryEvaluator, generate_all_trajectories, generate_random_obstacles, StraightLineTrajectory, fix_trajectory
 from thermal import ThermalGenerator, ThermalMap, ThermalEvaluator
 
 
-nUAVs = 1
+nUAVs = 3
 
 UAV_data = dict()
 UAV_data['maximum_battery_capacity'] = 10.0
@@ -93,6 +93,7 @@ for u in range(nUAVs):
 
     END_WPs[u]['X'].append(np.random.uniform(params['X_lower_bound'], params['X_upper_bound'], 1)[0].tolist())
     END_WPs[u]['Y'].append(np.random.uniform(params['Y_lower_bound'], params['Y_upper_bound'], 1)[0].tolist())
+    END_WPs[u]['Z'].append(400.0)
 
     FLT_track[u]['X'].append(np.random.uniform(params['X_lower_bound'], params['X_upper_bound'], 1)[0].tolist())
     FLT_track[u]['Y'].append(np.random.uniform(params['Y_lower_bound'], params['Y_upper_bound'], 1)[0].tolist())
@@ -163,6 +164,8 @@ while True:
         
         
     print(f"Temps: {current_time}s - UAV 0 - Alt: {FLT_track[0]['Z'][-1]:.1f}m, Mode: {FLT_track[0]['flight_mode'][-1]}")
+    print(f"Temps: {current_time}s - UAV 1 - Alt: {FLT_track[1]['Z'][-1]:.1f}m, Mode: {FLT_track[1]['flight_mode'][-1]}")
+    print(f"Temps: {current_time}s - UAV 2 - Alt: {FLT_track[2]['Z'][-1]:.1f}m, Mode: {FLT_track[2]['flight_mode'][-1]}")
     
     # Afficher les gains d'altitude si en évaluation ou soaring
     if FLT_track[0]['in_evaluation'] and 'evaluation_start_altitude' in FLT_track[0]:

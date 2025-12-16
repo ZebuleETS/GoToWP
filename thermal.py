@@ -89,7 +89,9 @@ class ThermalMap:
 
         if thermal_ids in self.detected_thermals:
             thermal = self.detected_thermals[thermal_ids]['thermal']
-            evaluation_radius = 75  # Rayon fixe de 75m pour l'évaluation
+            # Rayon adaptatif : 30% du rayon de la thermique pour rester dans la zone de forte portance
+            # Minimum 30m, maximum 50m pour garantir une bonne évaluation
+            evaluation_radius = max(30.0, min(50.0, thermal.radius * 0.3))
 
             # Nombre de points en fonction du périmètre et de la vitesse du drone
             perimeter = 2 * np.pi * evaluation_radius
@@ -97,12 +99,9 @@ class ThermalMap:
             
             # S'assurer qu'on a au moins 8 waypoints pour une évaluation complète
             num_waypoints = max(num_waypoints, 8)
-            
-            # Le bearing est déjà en radians - pas de conversion nécessaire
             start_angle_rad = bearing
 
             for i in range(num_waypoints):
-                # Calculer les angles en radians directement
                 angle_rad = start_angle_rad + (i * 2 * np.pi / num_waypoints)
 
                 # Calculer les positions des waypoints
@@ -140,7 +139,7 @@ class ThermalGenerator:
             
             # Paramètres variables
             radius = np.random.uniform(150, 300)  # Rayon entre 150 et 300m
-            strength = np.random.uniform(1.5, 4.0)  # Vitesse de montée entre 1.5 et 4.0 m/s
+            strength = np.random.uniform(2.0, 5.0)  # Vitesse de montée entre 2.0 et 5.0 m/s
             duration = np.random.uniform(360, 600)  # Durée entre 6 et 10 minutes
             
             # vérifier que le thermique n'est pas généré à l'intérieur d'un obstacle

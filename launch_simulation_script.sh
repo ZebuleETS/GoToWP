@@ -55,51 +55,7 @@ echo -e "${GREEN}Logs seront sauvegardés dans: $LOG_DIR${NC}"
 
 # Tableau pour stocker les PIDs
 declare -a PX4_PIDS
-
-# Fonction pour lancer un UAV
-launch_uav() {
-    local UAV_ID=$1
-    local INSTANCE=$UAV_ID
-    
-    # Ports pour chaque UAV
-    local MAVLINK_UDP_PORT=$((14540 + UAV_ID))
-    local MAVLINK_TCP_PORT=$((4560 + UAV_ID))
-    local SIM_PORT=$((14560 + UAV_ID))
-    
-    # Position de spawn (espacer les drones)
-    local SPAWN_X=$((UAV_ID % 3))
-    local SPAWN_Y=$((UAV_ID / 3))
-    
-    echo -e "${BLUE}Lancement UAV $UAV_ID...${NC}"
-    echo "  Instance: $INSTANCE"
-    echo "  MAVLink UDP: $MAVLINK_UDP_PORT"
-    echo "  Position spawn: ($SPAWN_X, $SPAWN_Y, 0)"
-    
-    cd $PX4_DIR
-    
-    # Variables d'environnement pour cette instance
-    export PX4_SIM_MODEL=plane
-    export PX4_INSTANCE=$INSTANCE
-    
-    # Commande de lancement
-    if [ $UAV_ID -eq 0 ]; then
-        # Premier UAV lance Gazebo
-        DONT_RUN=1 make px4_sitl gazebo_plane___$INSTANCE \
-            > $LOG_DIR/uav_${UAV_ID}.log 2>&1 &
-    else
-        # UAVs suivants utilisent le même Gazebo
-        DONT_RUN=1 make px4_sitl gazebo_plane___$INSTANCE \
-            > $LOG_DIR/uav_${UAV_ID}.log 2>&1 &
-    fi
-    
-    local PID=$!
-    PX4_PIDS[$UAV_ID]=$PID
-    
-    echo -e "${GREEN}  ✓ UAV $UAV_ID lancé (PID: $PID)${NC}"
-    
-    # Attendre un peu avant de lancer le suivant
-    sleep 5
-}
+declare -a MAVSDK_PIDS
 
 # Fonction de nettoyage
 cleanup() {
@@ -107,6 +63,11 @@ cleanup() {
     
     # Tuer tous les processus PX4
     for PID in "${PX4_PIDS[@]}"; do
+        if [ ! -z "$PID" ]; then
+            kill $PID 2>/dev/null || true
+        fi
+    done
+    for PID in "${MAVSDK_PIDS[@]}"; do
         if [ ! -z "$PID" ]; then
             kill $PID 2>/dev/null || true
         fi
@@ -132,7 +93,7 @@ echo -e "==========================================${NC}"
 cd $PX4_DIR
 
 # Lancer Gazebo avec le premier drone
-xterm -hold -e make px4_sitl gz_rc_cessna && /bin/bash >> $LOG_DIR/gazebo.log 2>&1 &
+make px4_sitl gz_rc_cessna > $LOG_DIR/gazebo.log 2>&1 &
 GAZEBO_PID=$!
 echo -e "${GREEN}✓ Gazebo lancé (PID: $GAZEBO_PID)${NC}"
 sleep 10
@@ -162,18 +123,23 @@ for ((i=1; i<$NUM_UAVS; i++)); do
     cd $MAVSDK_DIR
 
     # Lancer MAVSDK server pour cette instance
-    xterm -hold -e "./build/src/mavsdk_server/src/mavsdk_server udpin://0.0.0.0:$MAVLINK_UDP -p $MAVSDK_PORT"
+    ./build/src/mavsdk_server/src/mavsdk_server udpin://0.0.0.0:$MAVLINK_UDP -p $MAVSDK_PORT \
+        > $LOG_DIR/mavsdk_uav_${i}.log 2>&1 &
     
+    MAVSDK_PID=$!
+    MAVSDK_PIDS[$i]=$MAVSDK_PID
+    echo -e "${GREEN}✓ MAVSDK server lancé pour UAV $i (PID: $MAVSDK_PID)${NC}"
+
     cd $PX4_DIR
     
     # Lancer PX4 pour cette instance
-    xterm -hold -e PX4_GZ_STANDALONE=1 \
+    PX4_GZ_STANDALONE=1 \
     PX4_SYS_AUTOSTART=4003 \
     PX4_GZ_MODEL_POSE="$SPAWN_X, $SPAWN_Y" \
     PX4_SIM_MODEL=gz_rc_cessna \
     ./build/px4_sitl_default/bin/px4 \
         -i $INSTANCE && /bin/bash \
-        >> $LOG_DIR/px4_uav_${i}.log 2>&1 &
+        > $LOG_DIR/px4_uav_${i}.log 2>&1 &
     
     PID=$!
     PX4_PIDS[$i]=$PID

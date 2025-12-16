@@ -55,7 +55,7 @@ class StraightLineTrajectory(TrajectoryGenerator):
         Returns:
             dict: Points de trajectoire {X: [], Y: [], Z: []}
         """
-        num_points = self.params.get('num_points', 100)
+        num_points = self.params.get('num_points', 25)
         end_point = extract_waypoint(end_point)
         
         # Génération des points intermédiaires en ligne droite
@@ -86,7 +86,7 @@ class CircularTrajectory(TrajectoryGenerator):
         Returns:
             dict: Points de trajectoire {X: [], Y: [], Z: []}
         """
-        num_points = self.params.get('num_points', 200)
+        num_points = self.params.get('num_points', 50)
         base_radius = 100  # rayon initial en mètres
         end_point = extract_waypoint(end_point)
         
@@ -632,7 +632,7 @@ class PythagoreanHodographPath(TrajectoryGenerator):
         Returns:
             dict: Points de trajectoire {X: [], Y: [], Z: []}
         """
-        num_points = self.params.get('num_points', 200)
+        num_points = self.params.get('num_points', 100)
         end_point = extract_waypoint(end_point)
         # Conversion en coordonnées cartésiennes pour simplifier les calculs
         start_xyz = np.array([start_point['X'], start_point['Y'], start_point['Z']])
@@ -874,9 +874,9 @@ def generate_all_trajectories(start_point, end_point, params, UAV_data, obstacle
     circular = fix_trajectory(circular, obstacles)
     
     # Générateur Dubins 3D
-    dubins_traj = DubinsPath3D(params, UAV_data)
-    dubins = dubins_traj.generate_path(start_point, end_point)
-    dubins = fix_trajectory(dubins, obstacles)
+    #dubins_traj = DubinsPath3D(params, UAV_data)
+    #dubins = dubins_traj.generate_path(start_point, end_point)
+    #dubins = fix_trajectory(dubins, obstacles)
     
     # Générateur Pythagorean Hodograph
     ph_traj = PythagoreanHodographPath(params, UAV_data)
@@ -884,7 +884,7 @@ def generate_all_trajectories(start_point, end_point, params, UAV_data, obstacle
     ph = fix_trajectory(ph, obstacles)
 
     # Retourne une liste avec toutes les trajectoires
-    return [straight, circular, dubins, ph]
+    return [straight, circular, ph]
 
 class TrajectoryEvaluator:
     """Classe pour évaluer les trajectoires générées"""

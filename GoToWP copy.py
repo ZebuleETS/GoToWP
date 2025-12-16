@@ -200,17 +200,6 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
     # Obtention des données de vol actuelles
     FLT_data = get_current_flight_data(FLT_track, FLT_conditions, nUAVs)
     
-    # VALIDATION : Vérifier que les données d'entrée sont valides
-    if np.isnan(FLT_data[Uidx]['X']) or np.isnan(FLT_data[Uidx]['Y']) or np.isnan(FLT_data[Uidx]['Z']):
-        print(f"❌ UAV {Uidx}: Données de vol invalides en entrée!")
-        print(f"   Position: ({FLT_data[Uidx]['X']}, {FLT_data[Uidx]['Y']}, {FLT_data[Uidx]['Z']})")
-        return FLT_track, FLT_conditions, current_wp_idx
-    
-    if np.isnan(FLT_data[Uidx]['bearing']) or np.isnan(FLT_data[Uidx]['airspeed']):
-        print(f"❌ UAV {Uidx}: Bearing ou airspeed invalide!")
-        print(f"   Bearing: {FLT_data[Uidx]['bearing']}, Airspeed: {FLT_data[Uidx]['airspeed']}")
-        return FLT_track, FLT_conditions, current_wp_idx
-    
     Hr = np.linspace(FLT_data[Uidx]['bearing'], FLT_data[Uidx]['bearing'] + max_turn_rate, h_step)
     Hl = np.linspace(FLT_data[Uidx]['bearing'] - max_turn_rate, FLT_data[Uidx]['bearing'], h_step)
     H = np.hstack([Hl, Hr[1:]]).tolist()
@@ -219,29 +208,22 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
     Vl = np.linspace(min_velocity, FLT_data[Uidx]['airspeed'], v_step)
     V = np.hstack([Vl, Vr[1:]]).tolist()
 
-    #Créer REF une seule fois au lieu de le recréer dans chaque itération
-    REF = {
-        'X': FLT_data[Uidx]['X'],
-        'Y': FLT_data[Uidx]['Y']
-    }
-
     if FLT_data[Uidx]['flight_mode'] == 'glide':
-        # Pré-calculer les valeurs communes
-        current_z = FLT_data[Uidx]['Z']
-        delta_z = abs(current_z - LBz)
-        
         for i in range(len(H)):
             for j in range(len(V)):
                 FLT_conditions[Uidx]['airspeed'] = V[j]
                 FLT_conditions[Uidx]['airspeed_dot'] = 0.0
                 dZ = get_sink_rate(UAV_data, FLT_conditions[Uidx])
-                pridction_distance = (delta_z/dZ)*V[j] if dZ != 0 else V[j] * t_step
+                pridction_distance = (abs(FLT_data[Uidx]['Z'] - LBz)/dZ)*V[j] if dZ != 0 else V[j] * t_step
                 TD = V[j] * t_step
                 dZ_sink = -dZ * t_step
 
+                REF = dict()
+                REF['X'] = FLT_data[Uidx]['X']
+                REF['Y'] = FLT_data[Uidx]['Y']
                 x_new, y_new = get_destination_from_range_and_bearing_cartesian(REF, TD, H[i])
 
-                alt = min(max(current_z + dZ_sink, LBz), UBz)
+                alt = min(max(FLT_data[Uidx]['Z'] + dZ_sink, LBz), UBz)
 
                 candidate_sol['X'].append(x_new)
                 candidate_sol['Y'].append(y_new)
@@ -265,15 +247,6 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
         climb_angle = calculate_optimal_climb_angle(UAV_data, FLT_conditions[Uidx])
         level_angle = 0
         descent_angle = np.deg2rad(-5)
-        
-        # Pré-calculer les constantes trigonométriques et valeurs communes
-        cos_climb = np.cos(climb_angle)
-        sin_climb = np.sin(climb_angle)
-        cos_descent = np.cos(descent_angle)
-        sin_descent = np.sin(descent_angle)
-        current_z = FLT_data[Uidx]['Z']
-        delta_z_up = abs(UBz - current_z)
-        delta_z_down = abs(current_z - LBz)
 
         # Pour chaque cap possible
         for i in range(len(H)):
@@ -284,27 +257,20 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
                 # 1. MONTÉE AVEC MOTEUR
                 FLT_conditions[Uidx]['flight_path_angle'] = climb_angle
                 
-                # Calculer la distance parcourue et le changement d'altitude (utiliser constantes pré-calculées)
-                horizontal_distance = V[j] * t_step * cos_climb
-                altitude_change = V[j] * t_step * sin_climb
+                # Calculer la distance parcourue et le changement d'altitude
+                horizontal_distance = V[j] * t_step * np.cos(climb_angle)
+                altitude_change = V[j] * t_step * np.sin(climb_angle)
                 
                 # Calculer la consommation d'énergie pour la montée
                 pwr_climb = get_power_consumption(UAV_data, FLT_conditions[Uidx])
                 power_consumption_climb = pwr_climb * (t_step / 3600)
                 
-                # Calculer la nouvelle position (réutiliser REF)
+                # Calculer la nouvelle position
+                REF = dict()
+                REF['X'] = FLT_data[Uidx]['X']
+                REF['Y'] = FLT_data[Uidx]['Y']
                 x_new_climb, y_new_climb = get_destination_from_range_and_bearing_cartesian(REF, horizontal_distance, H[i])
-                
-                # Validation
-                if np.isnan(x_new_climb) or np.isnan(y_new_climb):
-                    print(f"UAV {Uidx} ENGINE-CLIMB: NaN position - dist={horizontal_distance:.2f}, H[{i}]={H[i]:.3f}")
-                    continue
-                
                 alt_climb = min(max(FLT_data[Uidx]['Z'] + altitude_change, LBz), UBz)
-                
-                if np.isnan(alt_climb):
-                    print(f"UAV {Uidx} ENGINE-CLIMB: NaN altitude - Z={FLT_data[Uidx]['Z']:.1f}, change={altitude_change:.2f}")
-                    continue
                 
                 # Ajouter le candidat pour la montée
                 candidate_sol['X'].append(x_new_climb)
@@ -316,8 +282,8 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
                 candidate_sol['airspeed'].append(V[j])
                 candidate_sol['flight_path_angle'].append(climb_angle)
                 
-                # Prédiction pour collision (réutiliser delta_z_up)
-                pridction_distance = (delta_z_up / altitude_change) * horizontal_distance if abs(altitude_change) > 1e-6 else V[j] * t_step
+                # Prédiction pour collision
+                pridction_distance = (abs(UBz - FLT_data[Uidx]['Z']) / altitude_change) * horizontal_distance if abs(altitude_change) > 1e-6 else V[j] * t_step
                 x_pred_climb, y_pred_climb = get_destination_from_range_and_bearing_cartesian(REF, pridction_distance, H[i])
                 PB_temp['X'].append(x_pred_climb)
                 PB_temp['Y'].append(y_pred_climb)
@@ -335,11 +301,6 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
                 
                 # Calculer la nouvelle position (altitude inchangée)
                 x_new_level, y_new_level = get_destination_from_range_and_bearing_cartesian(REF, horizontal_distance, H[i])
-                
-                # Validation
-                if np.isnan(x_new_level) or np.isnan(y_new_level):
-                    print(f"UAV {Uidx} ENGINE-LEVEL: NaN position - dist={horizontal_distance:.2f}, H[{i}]={H[i]:.3f}")
-                    continue
                 
                 # Ajouter le candidat pour le vol à niveau
                 candidate_sol['X'].append(x_new_level)
@@ -362,27 +323,17 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
                 # 3. DESCENTE CONTRÔLÉE AVEC MOTEUR
                 FLT_conditions[Uidx]['flight_path_angle'] = descent_angle
                 
-                # Calculer la distance parcourue et le changement d'altitude (utiliser constantes pré-calculées)
-                horizontal_distance = V[j] * t_step * cos_descent
-                altitude_change = V[j] * t_step * sin_descent  # Négatif car descente
+                # Calculer la distance parcourue et le changement d'altitude
+                horizontal_distance = V[j] * t_step * np.cos(descent_angle)
+                altitude_change = V[j] * t_step * np.sin(descent_angle)  # Négatif car descente
                 
                 # Calculer la consommation d'énergie pour la descente contrôlée
                 pwr_descent = get_power_consumption(UAV_data, FLT_conditions[Uidx])
                 power_consumption_descent = pwr_descent * (t_step / 3600)
                 
-                # Calculer la nouvelle position (réutiliser REF)
+                # Calculer la nouvelle position
                 x_new_descent, y_new_descent = get_destination_from_range_and_bearing_cartesian(REF, horizontal_distance, H[i])
-                
-                # Validation
-                if np.isnan(x_new_descent) or np.isnan(y_new_descent):
-                    print(f"UAV {Uidx} ENGINE-DESCENT: NaN position - dist={horizontal_distance:.2f}, H[{i}]={H[i]:.3f}")
-                    continue
-                
                 alt_descent = min(max(FLT_data[Uidx]['Z'] + altitude_change, LBz), UBz)
-                
-                if np.isnan(alt_descent):
-                    print(f"UAV {Uidx} ENGINE-DESCENT: NaN altitude - Z={FLT_data[Uidx]['Z']:.1f}, change={altitude_change:.2f}")
-                    continue
                 
                 # Ajouter le candidat pour la descente
                 candidate_sol['X'].append(x_new_descent)
@@ -394,8 +345,8 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
                 candidate_sol['airspeed'].append(V[j])
                 candidate_sol['flight_path_angle'].append(descent_angle)
                 
-                # Prédiction pour collision (réutiliser delta_z_down)
-                pridction_distance = (delta_z_down / abs(altitude_change)) * horizontal_distance if abs(altitude_change) > 1e-6 else V[j] * t_step
+                # Prédiction pour collision
+                pridction_distance = (abs(FLT_data[Uidx]['Z'] - LBz) / abs(altitude_change)) * horizontal_distance if abs(altitude_change) > 1e-6 else V[j] * t_step
                 x_pred_descent, y_pred_descent = get_destination_from_range_and_bearing_cartesian(REF, pridction_distance, H[i])
                 PB_temp['X'].append(x_pred_descent)
                 PB_temp['Y'].append(y_pred_descent)
@@ -539,97 +490,55 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
                 dest['Z'] = z_int
                 D2 = compute_distance_cartesian(pos, dest)[0]
 
-                t1 = Tsim_current + (D1 / candidate_sol['airspeed'][i])
-                t2 = Tsim_current + (D2 / FLT_data[u]['airspeed'])
-                DT = abs(t1 - t2) * candidate_sol['airspeed'][i]
-                flag2 = flag2 and (D0 >= HorizonLength or (D0 < HorizonLength and DT >= safe_dist))
+                # Vérifier que les vitesses sont valides
+                if candidate_sol['airspeed'][i] > 0 and FLT_data[u]['airspeed'] > 0:
+                    t1 = Tsim_current + (D1 / candidate_sol['airspeed'][i])
+                    t2 = Tsim_current + (D2 / FLT_data[u]['airspeed'])
+                    DT = abs(t1 - t2) * candidate_sol['airspeed'][i]
+
+                    flag2 = flag2 and (D0 >= HorizonLength or (D0 < HorizonLength and DT >= safe_dist))
 
         VO_flag.append(flag1)
         PO_flag.append(flag2)
         OB_flag.append(flag3)
 
-    # Vérifier qu'il y a des candidats valides
-    if len(candidate_sol['X']) == 0:
-        print(f"❌ UAV {Uidx}: Aucun candidat valide généré!")
-        print(f"   Mode: {FLT_data[Uidx]['flight_mode']}, Position: ({FLT_data[Uidx]['X']:.1f}, {FLT_data[Uidx]['Y']:.1f}, {FLT_data[Uidx]['Z']:.1f})")
-        # Conserver position actuelle
-        return FLT_track, FLT_conditions, current_wp_idx
-    
-    # Vectorisation optimale des calculs de coûts
-    # Pré-calculer les valeurs constantes
-    dest = {
-        'X': GOAL_WPs['X'][current_wp_idx],
-        'Y': GOAL_WPs['Y'][current_wp_idx],
-        'Z': GOAL_WPs['Z'][current_wp_idx]
-    }
-    battery_cap = FLT_data[Uidx]['battery_capacity']
-    z_ref = FLT_data[Uidx]['Z']
-    
-    # Construire un seul array 2D pour les positions
-    pos_array = np.column_stack([
-        candidate_sol['X'],
-        candidate_sol['Y'],
-        candidate_sol['Z']
-    ])
-    dest_array = np.array([dest['X'], dest['Y'], dest['Z']])
-    
-    # Calcul vectorisé optimisé des distances avec np.linalg.norm
-    C_distance = np.linalg.norm(pos_array - dest_array, axis=1)
-    
-    # Opérations booléennes vectorisées (pas de list comprehension)
-    VO_flag_array = np.array(VO_flag, dtype=bool)
-    PO_flag_array = np.array(PO_flag, dtype=bool)
-    OB_flag_array = np.array(OB_flag, dtype=bool)
-    
-    C_safety = -((VO_flag_array & PO_flag_array).astype(float))
-    C_obstacle = -(OB_flag_array.astype(float))
-    
-    # Calculs vectorisés pour énergie et sink
-    battery_array = np.array(candidate_sol['battery_capacity'])
-    C_energy = (battery_cap - battery_array) / battery_cap
-    C_sink = (z_ref - pos_array[:, 2]) / z_ref
-    
-    # Vérifier qu'il y a des candidats valides
-    if len(candidate_sol['X']) == 0:
-        print(f"❌ UAV {Uidx}: Aucun candidat valide généré!")
-        print(f"   Mode: {FLT_data[Uidx]['flight_mode']}, Position: ({FLT_data[Uidx]['X']:.1f}, {FLT_data[Uidx]['Y']:.1f}, {FLT_data[Uidx]['Z']:.1f})")
-        print(f"   H range: [{min(H):.3f}, {max(H):.3f}], V range: [{min(V):.1f}, {max(V):.1f}]")
-        return FLT_track, FLT_conditions, current_wp_idx
-    
-    # Debug: Afficher les stats des candidats uniquement si problème
-    if Uidx == 1 or len(candidate_sol['X']) < 3:
-        print(f"🔍 UAV {Uidx}: {len(candidate_sol['X'])} candidats générés")
-        if len(candidate_sol['X']) > 0:
-            print(f"   Premier candidat: ({candidate_sol['X'][0]:.1f}, {candidate_sol['Y'][0]:.1f}, {candidate_sol['Z'][0]:.1f})")
+    C_safety = []
+    C_distance = []
+    C_energy = []
+    C_sink = []
+    C_obstacle = []
+
+    for i in range(len(candidate_sol['X'])):
+        pos = dict()
+        pos['X'] = candidate_sol['X'][i]
+        pos['Y'] = candidate_sol['Y'][i]
+        pos['Z'] = candidate_sol['Z'][i]
+        dest = dict()
+        dest['X'] = GOAL_WPs['X'][current_wp_idx]  
+        dest['Y'] = GOAL_WPs['Y'][current_wp_idx]  
+        dest['Z'] = GOAL_WPs['Z'][current_wp_idx]
+        D0 = compute_distance_cartesian(pos, dest)[0]
+
+        C_safety.append(-float(VO_flag[i] and PO_flag[i]))
+        C_distance.append(D0)
+        C_energy.append((FLT_data[Uidx]['battery_capacity'] - candidate_sol['battery_capacity'][i]) / FLT_data[Uidx]['battery_capacity'])
+        C_sink.append((FLT_data[Uidx]['Z'] - candidate_sol['Z'][i]) / FLT_data[Uidx]['Z'])
+        C_obstacle.append(-float(OB_flag[i]))  # -1 si collision avec obstacle, 0 sinon
+        
+    C_safety = np.array(C_safety)
+    C_distance = np.array(C_distance)
+    C_energy = np.array(C_energy)
+    C_sink = np.array(C_sink)
+    C_obstacle = np.array(C_obstacle)
     
     DM = np.column_stack([C_safety, C_distance, C_energy, C_sink, C_obstacle])
     ranked_indices = decision_making(DM)
     idx = ranked_indices[0]  # Meilleur candidat selon le classement
-    
-    # VALIDATION FINALE : Vérifier que la solution choisie est valide
-    final_x = candidate_sol['X'][idx]
-    final_y = candidate_sol['Y'][idx]
-    final_z = candidate_sol['Z'][idx]
-    final_bearing = candidate_sol['bearing'][idx]
-    
-    if np.isnan(final_x) or np.isnan(final_y) or np.isnan(final_z) or np.isnan(final_bearing):
-        print(f"❌ UAV {Uidx}: Solution finale invalide détectée!")
-        print(f"   Pos: ({final_x:.2f}, {final_y:.2f}, {final_z:.2f}), Bearing: {final_bearing:.3f}")
-        print(f"   Mode: {candidate_sol['flight_mode'][idx]}, Airspeed: {candidate_sol['airspeed'][idx]:.2f}")
-        print(f"   Nombre de candidats: {len(candidate_sol['X'])}, Index choisi: {idx}")
-        
-        # En cas de solution invalide, conserver la dernière position valide
-        if len(FLT_track[Uidx]['X']) > 0:
-            print(f"   ➡️  Conservation dernière position valide")
-            return FLT_track, FLT_conditions, current_wp_idx
-        else:
-            print(f"   ❌ Aucune position valide précédente - Erreur critique")
-            return FLT_track, FLT_conditions, current_wp_idx
 
-    FLT_track[Uidx]['X'].append(final_x)
-    FLT_track[Uidx]['Y'].append(final_y)
-    FLT_track[Uidx]['Z'].append(final_z)
-    FLT_track[Uidx]['bearing'].append(final_bearing)
+    FLT_track[Uidx]['X'].append(candidate_sol['X'][idx])
+    FLT_track[Uidx]['Y'].append(candidate_sol['Y'][idx])
+    FLT_track[Uidx]['Z'].append(candidate_sol['Z'][idx])
+    FLT_track[Uidx]['bearing'].append(candidate_sol['bearing'][idx])
     
     candidate_mode = candidate_sol['flight_mode'][idx]
 
@@ -1067,17 +976,15 @@ def process_single_uav(Uidx, FLT_track, FLT_conditions, GOAL_WPs, nUAVs, params,
             result['wp_idx'] = current_wp_indices[Uidx]
             return result
         
-        # Créer une structure temporaire - copier SEULEMENT l'UAV actuel (optimisation)
+        # Créer une structure temporaire contenant TOUS les UAVs
         temp_track = {}
         temp_conditions = {}
         
-        # Copie profonde uniquement pour l'UAV traité
-        temp_track[Uidx] = copy.deepcopy(FLT_track[Uidx])
-        temp_conditions[Uidx] = copy.deepcopy(FLT_conditions[Uidx])
-        
-        # Références directes pour les autres (lecture seule)
         for i in range(nUAVs):
-            if i != Uidx:
+            if i == Uidx:
+                temp_track[i] = copy.deepcopy(FLT_track[i])
+                temp_conditions[i] = copy.deepcopy(FLT_conditions[i])
+            else:
                 temp_track[i] = FLT_track[i]
                 temp_conditions[i] = FLT_conditions[i]
         
@@ -1265,19 +1172,6 @@ def process_single_uav(Uidx, FLT_track, FLT_conditions, GOAL_WPs, nUAVs, params,
         result['track'] = temp_track[Uidx]
         result['conditions'] = temp_conditions[Uidx]
         
-        # Validation : Vérifier qu'il n'y a pas de NaN dans les résultats
-        if len(temp_track[Uidx]['X']) > 0:
-            last_x = temp_track[Uidx]['X'][-1]
-            last_y = temp_track[Uidx]['Y'][-1]
-            last_z = temp_track[Uidx]['Z'][-1]
-            
-            if np.isnan(last_x) or np.isnan(last_y) or np.isnan(last_z):
-                print(f"⚠️  UAV {Uidx}: Position invalide générée - annulation")
-                result['error'] = 'invalid_position'
-                # Ne pas retourner ces données invalides
-                result['track'] = None
-                result['conditions'] = None
-        
     except Exception as e:
         import traceback
         print(f"Erreur lors du traitement de l'UAV {Uidx}: {e}")
@@ -1293,10 +1187,9 @@ def gotoWaypointMulti(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, params, UAV_da
                       SOAR_WPs=None, max_workers=None):
     """
     Version parallélisée de gotoWaypointMulti utilisant ThreadPoolExecutor.
-    Chaque drone est traité de manière totalement indépendante et peut avancer à son propre rythme.
     
     Args:
-        max_workers (int, optional): Nombre maximum de threads. Par défaut: nUAVs (un thread par drone)
+        max_workers (int, optional): Nombre maximum de threads. Par défaut: min(nUAVs, 4)
     """
     # Nettoyer obstacles temporaires
     cleaned_obstacles = []
@@ -1309,9 +1202,9 @@ def gotoWaypointMulti(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, params, UAV_da
     
     params['obstacles'] = cleaned_obstacles
     
-    # Déterminer nombre de workers - un thread par drone pour indépendance maximale
+    # Déterminer nombre de workers
     if max_workers is None:
-        max_workers = nUAVs  # Un thread par drone pour qu'ils avancent tous à leur rythme
+        max_workers = min(nUAVs, 4)  # Limiter à 4 threads par défaut
     
     # Créer fonction partielle avec paramètres communs
     process_func = partial(
@@ -1332,28 +1225,18 @@ def gotoWaypointMulti(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, params, UAV_da
         SOAR_WPs=SOAR_WPs
     )
     
-    # Traiter tous les UAVs en parallèle - chaque drone avance à son rythme
+    # Traiter tous les UAVs en parallèle
     results = []
-    failed_uavs = []
-    
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Soumettre tous les drones en parallèle
         futures = {executor.submit(process_func, Uidx): Uidx for Uidx in range(nUAVs)}
         
-        # Collecter les résultats au fur et à mesure (sans timeout - chaque drone prend son temps)
         for future in as_completed(futures):
-            Uidx = futures[future]
             try:
-                result = future.result()  # Pas de timeout - on attend que chaque drone termine
+                result = future.result()
                 results.append(result)
             except Exception as e:
-                print(f"⚠️ Exception UAV {Uidx}: {e}")
-                failed_uavs.append(Uidx)
-                # Créer un résultat minimal pour continuer
-                results.append({'Uidx': Uidx, 'error': str(e), 'wp_idx': current_wp_indices[Uidx]})
-    
-    if failed_uavs:
-        print(f"ℹ️ {len(failed_uavs)}/{nUAVs} drones ont rencontré des erreurs: {failed_uavs}")
+                Uidx = futures[future]
+                print(f"Exception lors du traitement UAV {Uidx}: {e}")
     
     # Appliquer les résultats dans l'ordre
     results.sort(key=lambda x: x['Uidx'])
