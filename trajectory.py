@@ -215,399 +215,92 @@ class CircularTrajectory(TrajectoryGenerator):
         
         return {'X': x_points.tolist(), 'Y': y_points.tolist(), 'Z': z_points.tolist()}
 
-class DubinsPath3D(TrajectoryGenerator):
+class LawnMowerTrajectory(TrajectoryGenerator):
     """
-    3D Dubins path trajectory generator
-    
-    Implémentation des chemins de Dubins (LSL, RSR, LSR, RSL) pour les UAVs en 3D.
-    Un chemin de Dubins est constitué de segments circulaires et droits respectant
-    les contraintes de rayon de courbure minimum du véhicule.
+    Lawn mower trajectory generator for cartesian coordinates
+    Génère une trajectoire en "tondeuse à gazon" pour couvrir une zone rectangulaire
     
     Args:
-        params (dict): Parameters for the trajectory generation, e.g., number of points, radius, etc.
+        params (dict): Parameters for the trajectory generation, e.g., fov_radius, altitude, etc.
         UAV_data (dict): UAV data containing specifications like speed, altitude limits, etc.
     """
     
     def __init__(self, params=None, UAV_data=None):
         super().__init__(params, UAV_data)
-        # Calcul du rayon de virage minimum si les paramètres sont disponibles
-        if self.params is not None and self.UAV_data is not None:
-            min_velocity = self.UAV_data.get('min_airspeed', 8.0)
-            max_velocity = self.UAV_data.get('max_airspeed', 30.0)
-            max_turn_rate = self.UAV_data.get('max_turn_rate', 0.7)
-            avg_velocity = (min_velocity + max_velocity) / 2
-            self.min_turn_radius = avg_velocity / max_turn_rate
-            
-        # Liste des configurations de Dubins possibles
-        self.dubins_configs = ['LSL', 'RSR', 'LSR', 'RSL']
-
-    def generate_path(self, start_point, end_point) -> Dict:
+        
+    def generate_path(self, area_bounds, fov_radius, uav_id=0, num_uavs=1, altitude=None) -> Dict:
         """
-        Génère une trajectoire Dubins 3D entre deux points en évaluant toutes 
-        les configurations possibles (LSL, RSR, LSR, RSL) et en choisissant la meilleure.
+        Génère une trajectoire en tondeuse à gazon pour couvrir une zone
         
         Args:
-            start_point (dict): Point de départ {X, Y, Z}
-            end_point (dict): Point d'arrivée {X, Y, Z}
+            area_bounds (dict): Limites de la zone {X_min, X_max, Y_min, Y_max}
+            fov_radius (float): Rayon du champ de vision (FOV) en mètres
+            uav_id (int): ID du drone (0, 1, 2, ...)
+            num_uavs (int): Nombre total de drones
+            altitude (float): Altitude de vol (optionnelle, sinon utilise params)
+            
         Returns:
             dict: Points de trajectoire {X: [], Y: [], Z: []}
         """
-        num_points = self.params.get('num_points', 200)
-        end_point = extract_waypoint(end_point)
-        # Calculer le cap initial et final
-        bearing_start = 0  # Par défaut, on suppose que le drone pointe vers l'axe X positif
-        if 'bearing' in start_point:
-            bearing_start = start_point['bearing']
+        # Extraction des limites de la zone
+        x_min = area_bounds.get('X_min', self.params.get('X_lower_bound', 0.0))
+        x_max = area_bounds.get('X_max', self.params.get('X_upper_bound', 6000.0))
+        y_min = area_bounds.get('Y_min', self.params.get('Y_lower_bound', 0.0))
+        y_max = area_bounds.get('Y_max', self.params.get('Y_upper_bound', 6000.0))
         
-        # Calculer le cap entre le point de départ et d'arrivée
-        bearing_end = compute_bearing_cartesian(start_point, end_point)[0]
+        if altitude is None:
+            altitude = 400
         
-        # Évaluer chaque configuration de Dubins et choisir la meilleure
-        min_length = float('inf')
-        best_path = None
+        # Espacement entre les lignes est le diamêtre FOV
+        # Le drone suit la ligne donc rayon = FOV /2
+        line_spacing = fov_radius
         
-        for config in self.dubins_configs:
-            path, length = self._compute_dubins_path(start_point, end_point, bearing_start, 
-                                               bearing_end, config, num_points)
-            if path is not None and length < min_length:
-                min_length = length
-                best_path = path
+        # Calculer le nombre de lignes nécessaires pour couvrir toute la zone
+        coverage_width = y_max - y_min
+        num_lines = int(np.ceil(coverage_width / line_spacing)) + 1
         
-        if best_path is None:
-            # Fallback: générer une ligne droite si aucun chemin n'est valide
-            straight_points = num_points
-            straight_path = self._generate_straight_segment(start_point, end_point, straight_points)
+        # Décalage initial pour séparer les drones
+        # Chaque drone commence à une position différente en Y
+        offset_per_uav = line_spacing / num_uavs
+        y_start_offset = uav_id * offset_per_uav
+        
+        # Générer les waypoints
+        waypoints_x = []
+        waypoints_y = []
+        waypoints_z = []
+        
+        # Chaque drone parcourt toutes les lignes mais commence à des positions différentes
+        for line_idx in range(num_lines):
+            # Position Y de cette ligne
+            y_pos = y_min + y_start_offset + (line_idx * line_spacing)
             
-            x_points = straight_path['path']['X']
-            y_points = straight_path['path']['Y']
-            
-            # Interpolation linéaire de l'altitude
-            z_points = []
-            for i in range(len(x_points)):
-                fraction = i / (len(x_points) - 1) if len(x_points) > 1 else 0
-                z = start_point['Z'] + fraction * (end_point['Z'] - start_point['Z'])
-                z_points.append(z)
-        else:
-            x_points = best_path['X']
-            y_points = best_path['Y']
-            z_points = best_path['Z']
-        
-        # Si numpy array, convertir en liste
-        if isinstance(z_points, np.ndarray):
-            z_points = z_points.tolist()
-            
-        trajectory = {'X': x_points, 'Y': y_points, 'Z': z_points}
-        
-        smoother = TrajectorySmoothing(self.params)
-        trajectory = smoother.smooth_trajectory(trajectory, method='dubins_junctions')
-
-        return trajectory
-
-    def _compute_dubins_path(self, start_point, end_point, bearing_start, bearing_end,
-                            config, num_points_total):
-        """
-        Calcule un chemin de Dubins selon une configuration spécifique.
-        
-        Args:
-            start_point (dict): Point de départ {X, Y, Z}
-            end_point (dict): Point d'arrivée {X, Y, Z}
-            bearing_start (float): Cap initial en radians
-            bearing_end (float): Cap final en radians
-            config (str): Configuration Dubins ('LSL', 'RSR', 'LSR', 'RSL')
-            num_points_total (int): Nombre total de points pour la trajectoire
-        
-        Returns:
-            tuple: (path, length) où path est un dict {X, Y, Z}
-                  et length est la longueur totale du chemin
-        """
-        # Normaliser les bearings entre 0 et 2*pi
-        bearing_start = bearing_start % (2 * pi)
-        bearing_end = bearing_end % (2 * pi)
-        
-        # Diviser le nombre de points entre les segments (3 segments: 2 virages + 1 droit)
-        points_per_segment = num_points_total // 3
-        
-        # Points à générer pour chaque segment
-        first_turn_points = points_per_segment
-        straight_points = points_per_segment
-        second_turn_points = num_points_total - first_turn_points - straight_points
-        
-        # Direction du premier virage ('L' gauche, 'R' droite)
-        first_turn_dir = config[0]
-        
-        # Direction du segment droit ('S')
-        # Configuration du second virage ('L' gauche, 'R' droite)
-        second_turn_dir = config[2]
-        
-        # Déterminer l'angle des virages en fonction de la direction
-        first_turn_angle = pi/2 if first_turn_dir == 'L' else -pi/2
-        second_turn_angle = pi/2 if second_turn_dir == 'L' else -pi/2
-        
-        # Calculer les centres des cercles pour les virages
-        first_center_bearing = (bearing_start + first_turn_angle) % (2 * pi)
-        first_center = {
-            'X': 0,
-            'Y': 0,
-            'Z': start_point['Z']
-        }
-        first_center['X'], first_center['Y'] = get_destination_from_range_and_bearing_cartesian(
-            start_point, self.min_turn_radius, first_center_bearing
-        )
-        
-        # Générer le premier virage
-        mid_bearing = None
-        if first_turn_dir == 'L':
-            delta = pi/2  # Pour un virage à gauche, nous tournons de 90 degrés
-            mid_bearing = (bearing_start + delta) % (2 * pi)
-        else:  # 'R'
-            delta = -pi/2  # Pour un virage à droite, nous tournons de -90 degrés
-            mid_bearing = (bearing_start + delta) % (2 * pi)
-        
-        # Point intermédiaire après le premier virage
-        mid_point = {
-            'X': 0,
-            'Y': 0,
-            'Z': start_point['Z']
-        }
-        mid_point['X'], mid_point['Y'] = get_destination_from_range_and_bearing_cartesian(
-            first_center, self.min_turn_radius, (mid_bearing + pi) % (2 * pi)
-        )
-        
-        # Calculer le centre du deuxième cercle
-        second_center_bearing = (bearing_end + second_turn_angle) % (2 * pi)
-        second_center = {
-            'X': 0,
-            'Y': 0,
-            'Z': end_point['Z']
-        }
-
-        second_center['X'], second_center['Y'] = get_destination_from_range_and_bearing_cartesian(
-            end_point, self.min_turn_radius, second_center_bearing
-        )
-        
-        # Calculer le point de tangence pour la transition entre le segment droit et le deuxième virage
-        tangent_point = self._find_tangent_point(mid_point, mid_bearing, second_center,
-                                               self.min_turn_radius, second_turn_dir)
-        
-        if tangent_point is None:
-            # Aucun point de tangente trouvé, cette configuration n'est pas valide
-            return None, float('inf')
-        
-        # Générer le premier virage
-        first_turn = self._generate_turn_segment(
-            start_point, bearing_start, mid_bearing, first_turn_points, first_turn_dir
-        )
-        
-        # Générer le segment droit
-        straight_segment = self._generate_straight_segment(
-            mid_point, tangent_point, straight_points
-        )
-        
-        # Calculer le bearing final pour le deuxième virage
-        final_tangent_bearing = compute_bearing_cartesian(tangent_point, second_center)[0]
-        final_bearing = (final_tangent_bearing + pi) % (2 * pi)
-        
-        # Générer le deuxième virage
-        second_turn = self._generate_turn_segment(
-            tangent_point, final_bearing, bearing_end, second_turn_points, second_turn_dir
-        )
-        
-        # Fusionner les segments
-        x_points = first_turn['path']['X'] + straight_segment['path']['X'] + second_turn['path']['X']
-        y_points = first_turn['path']['Y'] + straight_segment['path']['Y'] + second_turn['path']['Y']
-        z_points = first_turn['path']['Z'] + straight_segment['path']['Z'] + second_turn['path']['Z']
-        
-        # Interpolation linéaire de l'altitude sur tout le chemin
-        for i in range(len(z_points)):
-            fraction = i / (len(z_points) - 1) if len(z_points) > 1 else 0
-            z_points[i] = start_point['Z'] + fraction * (end_point['Z'] - start_point['Z'])
-
-        # Calculer la longueur totale du chemin
-        first_arc_length = self.min_turn_radius * abs(mid_bearing - bearing_start)
-        straight_length = compute_distance_cartesian(mid_point, tangent_point)[0]
-        second_arc_length = self.min_turn_radius * abs(bearing_end - final_bearing)
-        total_length = first_arc_length + straight_length + second_arc_length
-        
-        return {'X': x_points, 'Y': y_points, 'Z': z_points}, total_length
-    
-    def _find_tangent_point(self, start_point, start_bearing, circle_center, radius, turn_dir):
-        """
-        Trouve le point de tangence à un cercle à partir d'un point et d'un bearing initial.
-        
-        Args:
-            start_point (dict): Point de départ
-            start_bearing (float): Cap initial en radians
-            circle_center (dict): Centre du cercle
-            radius (float): Rayon du cercle
-            turn_dir (str): Direction du virage ('L' ou 'R')
-            
-        Returns:
-            dict: Point de tangente ou None si aucun n'existe
-        """
-        # Distance entre le point de départ et le centre du cercle
-        d = compute_distance_cartesian(start_point, circle_center)[0]
-        
-        # Si la distance est inférieure au rayon, aucune tangente externe n'est possible
-        if d <= radius:
-            return None
-        
-        # Bearing du centre du cercle par rapport au point de départ
-        center_bearing = compute_bearing_cartesian(start_point, circle_center)[0]
-        
-        # Angle entre le bearing initial et la direction du centre
-        alpha = (center_bearing - start_bearing) % (2 * pi)
-        
-        # Angle entre la tangente et la ligne du centre
-        theta = asin(radius / d)
-        
-        # Ajustement en fonction de la direction du virage
-        if turn_dir == 'L':
-            tangent_bearing = (center_bearing + theta) % (2 * pi)
-        else:  # 'R'
-            tangent_bearing = (center_bearing - theta) % (2 * pi)
-            
-        # Distance le long de la tangente
-        tangent_distance = d * cos(theta)
-        
-        # Point de tangence
-        tangent_point = {
-            'X': 0,
-            'Y': 0,
-            'Z': start_point['Z']
-        }
-        tangent_point['X'], tangent_point['Y'] = get_destination_from_range_and_bearing_cartesian(
-            start_point, tangent_distance, tangent_bearing
-        )
-        
-        return tangent_point
-        
-    def _generate_turn_segment(self, start_point, start_bearing, end_bearing, num_points, turn_dir='L'):
-        """
-        Génère un segment de virage entre deux caps (bearings)
-        
-        Args:
-            start_point (dict): Point de départ {X, Y, Z}
-            start_bearing (float): Cap initial (radians)
-            end_bearing (float): Cap final (radians)
-            num_points (int): Nombre de points à générer
-            turn_dir (str): Direction du virage ('L' pour gauche, 'R' pour droite)
-            
-        Returns:
-            dict: Segment de virage {path: {X, Y, Z}, end_point}
-        """
-        # Normaliser les bearings entre 0 et 2*pi
-        start_bearing = start_bearing % (2 * pi)
-        end_bearing = end_bearing % (2 * pi)
-        
-        # Calculer la direction et l'angle de rotation
-        direction = 1 if turn_dir == 'L' else -1  # 1 pour gauche, -1 pour droite
-        
-        # Calculer l'angle de rotation
-        if turn_dir == 'L':
-            delta_bearing = (end_bearing - start_bearing) % (2 * pi)
-        else:
-            delta_bearing = (start_bearing - end_bearing) % (2 * pi)
-            delta_bearing = -delta_bearing  # Pour virage à droite
-        
-        # Assurer que l'angle est dans la bonne direction
-        if (turn_dir == 'L' and delta_bearing < 0) or (turn_dir == 'R' and delta_bearing > 0):
-            delta_bearing = delta_bearing + direction * 2 * pi
-            
-        # Calculer le centre du cercle de virage
-        center_bearing = (start_bearing + direction * pi/2) % (2 * pi)
-        center_x, center_y = get_destination_from_range_and_bearing_cartesian(
-            start_point, self.min_turn_radius, center_bearing
-        )
-        center_point = {
-            'X': center_x,
-            'Y': center_y,
-            'Z': start_point['Z']
-        }
-        
-        # Générer les points sur l'arc
-        bearings = np.linspace(0, abs(delta_bearing), num_points)
-        x_points = []
-        y_points = []
-        
-        for angle in bearings:
-            # Pour chaque bearing, calculer un point sur le cercle
-            if turn_dir == 'L':
-                point_bearing = (start_bearing + angle) % (2 * pi)
-            else:
-                point_bearing = (start_bearing - angle) % (2 * pi)
+            # Alterner la direction (gauche-droite, droite-gauche)
+            if line_idx % 2 == 0:
+                # Ligne de gauche à droite
+                waypoints_x.append(x_min)
+                waypoints_y.append(y_pos)
+                waypoints_z.append(altitude)
                 
-            # Direction du point depuis le centre (opposée au bearing)
-            from_center_bearing = (point_bearing + pi + direction * pi/2) % (2 * pi)
-            x, y = get_destination_from_range_and_bearing_cartesian(
-                center_point, self.min_turn_radius, from_center_bearing
-            )
-            x_points.append(x)
-            y_points.append(y)
-
-        # Point final du virage
-        end_point = {
-            'X': x_points[-1],
-            'Y': y_points[-1],
-            'Z': start_point['Z']
-        }
-        
-        # Altitudes (même altitude partout dans le virage)
-        z_points = [start_point['Z']] * num_points
+                waypoints_x.append(x_max)
+                waypoints_y.append(y_pos)
+                waypoints_z.append(altitude)
+            else:
+                # Ligne de droite à gauche
+                waypoints_x.append(x_max)
+                waypoints_y.append(y_pos)
+                waypoints_z.append(altitude)
+                
+                waypoints_x.append(x_min)
+                waypoints_y.append(y_pos)
+                waypoints_z.append(altitude)
         
         return {
-            'path': {
-                'X': x_points,
-                'Y': y_points,
-                'Z': z_points
-            },
-            'end_point': end_point
+            'X': waypoints_x.tolist(),
+            'Y': waypoints_y.tolist(),
+            'Z': waypoints_z.tolist()
         }
 
-    def _generate_straight_segment(self, start_point, end_point, num_points):
-        """
-        Génère un segment de trajectoire en ligne droite
-        
-        Args:
-            start_point (dict): Point de départ
-            end_point (dict): Point d'arrivée
-            num_points (int): Nombre de points à générer
-            
-        Returns:
-            dict: Segment droit {path: {latitude, longitude, altitude}, end_point}
-        """
-        # Générer les points intermédiaires
-        fractions = np.linspace(0, 1, num_points)
-        x_points = []
-        y_points = []
-        
-        # Calculer le bearing initial
-        bearing = compute_bearing_cartesian(start_point, end_point)[0]
-        
-        # Calculer la distance
-        distance = compute_distance_cartesian(start_point, end_point)[0]
-        
-        for f in fractions:
-            # Pour chaque fraction, calculer un point à la distance proportionnelle
-            x, y = get_destination_from_range_and_bearing_cartesian(
-                start_point, f * distance, bearing
-            )
-            x_points.append(x)
-            y_points.append(y)
-
-        # Interpolation linéaire de l'altitude
-        z_points = []
-        for f in fractions:
-            alt = start_point['Z'] + f * (end_point['Z'] - start_point['Z'])
-            z_points.append(alt)
-        
-        return {
-            'path': {
-                'X': x_points,
-                'Y': y_points,
-                'Z': z_points
-            },
-            'end_point': end_point
-        }
+    
         
 class PythagoreanHodographPath(TrajectoryGenerator):
     """

@@ -13,8 +13,7 @@ import pymap3d as pm
 
 # Importer vos modules existants
 from GoToWP import gotoWaypointMulti
-from compute import compute_distance_cartesian, geographic_to_cartesian, cartesian_to_geographic
-from trajectory import TrajectoryEvaluator, generate_all_trajectories, generate_random_obstacles, fix_trajectory, StraightLineTrajectory
+from trajectory import TrajectoryEvaluator, generate_all_trajectories, generate_random_obstacles, LawnMowerTrajectory
 from thermal import ThermalGenerator, ThermalMap, ThermalEvaluator
 from Scenario import (TestScenario, PerformanceMetrics, SurveillanceObject, 
                       ScenarioGenerator, PerformanceAnalyzer, select_scenario)
@@ -412,6 +411,54 @@ class MultiUAVController:
         print(f"\n✓ Altitude cible définie à {target_altitude}m pour tous les UAVs!")
 
 
+def generate_lawnmower_trajectories(nUAVs, params, UAV_data, fov_radius):
+    """
+    Génère des trajectoires LawnMower pour tous les UAVs pour une couverture maximale
+    
+    Args:
+        nUAVs (int): Nombre de drones
+        params (dict): Paramètres de simulation
+        UAV_data (dict): Données des UAVs
+        fov_radius (float): Rayon du champ de vision
+        coverage_area (dict): Zone à couvrir {X_min, X_max, Y_min, Y_max} (optionnel)
+        
+    Returns:
+        dict: Trajectoires pour chaque UAV {0: {X: [], Y: [], Z: []}, ...}
+    """
+    
+    x_min = params['X_lower_bound']
+    x_max = params['X_upper_bound']
+    y_min = params['Y_lower_bound']
+    y_max = params['Y_upper_bound']
+    altitude = param['working_floor']
+    
+    coverage_area = {
+        'X_min': x_min,
+        'X_max': x_max,
+        'Y_min': y_min,
+        'Y_max': y_max,
+    }
+    
+    # Créer le générateur de trajectoire LawnMower
+    lawnmower = LawnMowerTrajectory(params, UAV_data)
+    
+    # Générer les trajectoires pour chaque UAV
+    trajectories = {}
+    for u in range(nUAVs):
+        trajectory = lawnmower.generate_path(
+            area_bounds=coverage_area,
+            fov_radius=fov_radius,
+            uav_id=u,
+            num_uavs=nUAVs,
+            altitude=altitude
+        )
+        trajectories[u] = trajectory
+        
+        print(f"  UAV {u}: {len(trajectory['X'])} waypoints générés")
+    
+    return trajectories
+
+
 async def run_multi_uav_simulation():
     """
     Fonction principale pour simulation multi-UAV avec PX4
@@ -456,9 +503,9 @@ async def run_multi_uav_simulation():
     params['Z_lower_bound'] = 200.0
     params['Z_upper_bound'] = 1000.0
     params['current_simulation_time'] = 0.0
-    params['time_step'] = 0.5  # Time step cible pour synchronisation temps réel (secondes)
-    params['target_real_time_per_iteration'] = 0.5  # Temps réel cible par itération
-    params['bearing_step'] = 5  # Réduit de 10 à 5 pour accélérer (50% moins de calculs)
+    params['time_step'] = 1.1  # Time step cible pour synchronisation temps réel (secondes)
+    params['target_real_time_per_iteration'] = 1.1  # Temps réel cible par itération
+    params['bearing_step'] = 4  # Réduit de 10 à 5 pour accélérer (50% moins de calculs)
     params['speed_step'] = 3  # Réduit de 10 à 3 pour accélérer (70% moins de calculs)
     params['safe_distance'] = 30.0
     params['horizon_length'] = 100.0
@@ -504,43 +551,35 @@ async def run_multi_uav_simulation():
         # ========== GÉNÉRATION SCÉNARIO BASÉE SUR LES POSITIONS HOME ==========
         scenario_gen = ScenarioGenerator()
         surveillance_objects = None
+        active_thermals = dict()
+        thermal_map = ThermalMap()
+        thermal_evaluator = ThermalEvaluator(params, UAV_data)
         
         if scenario == TestScenario.PRELIMINARY_COLLISION:
             # Les drones partent de leurs positions home et convergent vers le centre
-            start_positions = {u: home_positions[u] for u in range(nUAVs)}
-            end_position = {'X': center_x, 'Y': center_y, 'Z': center_z}
-            obstacles = generate_random_obstacles(3, params)
+            start_positions, end_position, obstacles = scenario_gen.generate_preliminary_collision_scenario(nUAVs, params, home_positions)
             params['obstacles'] = obstacles
             allow_glide = True
-            active_thermals = []
-            print(f"\n✓ Scénario collision: convergence vers ({center_x:.0f}, {center_y:.0f}, {center_z:.0f})")
             
         elif scenario == TestScenario.TRAJECTORY_OPTIMAL_POWERED:
             # Positions de départ = positions home, destination éloignée
-            start_positions = {u: home_positions[u] for u in range(nUAVs)}
-            end_position = {
-                'X': center_x + 1000.0,
-                'Y': center_y + 1000.0,
-                'Z': center_z
-            }
-            obstacles = generate_random_obstacles(5, params)
-            params['obstacles'] = obstacles
             allow_glide = False
-            active_thermals = []
+            start_positions, end_position, obstacles = scenario_gen.generate_trajectory_optimal_scenario(nUAVs, params, home_positions, allow_glide)
+            params['obstacles'] = obstacles
+            
             print(f"\n✓ Scénario trajectoire optimale (motorisé) vers ({end_position['X']:.0f}, {end_position['Y']:.0f})")
             
         elif scenario == TestScenario.TRAJECTORY_OPTIMAL_GLIDE:
             # Positions de départ = positions home, destination éloignée avec planage
-            start_positions = {u: home_positions[u] for u in range(nUAVs)}
-            end_position = {
-                'X': center_x + 1500.0,
-                'Y': center_y + 1500.0,
-                'Z': center_z
-            }
-            obstacles = generate_random_obstacles(5, params)
-            params['obstacles'] = obstacles
             allow_glide = True
-            active_thermals = []
+            start_positions, end_position, obstacles = scenario_gen.generate_trajectory_optimal_scenario(nUAVs, params, home_positions, allow_glide)
+            params['obstacles'] = obstacles
+            thermal_generator = ThermalGenerator(params)
+            num_thermals = max(2, nUAVs // 3)
+            active_thermals = thermal_generator.generate_random_thermals(
+                num_thermals, obstacles, params['current_simulation_time']
+            )
+            print(f'✓ {len(active_thermals)} thermiques actives')
             print(f"\n✓ Scénario trajectoire optimale (planeur) vers ({end_position['X']:.0f}, {end_position['Y']:.0f})")
             
         elif scenario == TestScenario.ENDURANCE:
@@ -569,59 +608,21 @@ async def run_multi_uav_simulation():
             print(f"\n✓ Scénario endurance: {len(active_thermals)} thermiques, départ des positions home")
         
         elif scenario == TestScenario.COVERAGE:
-            # Positions de départ = positions home réelles des UAVs
             mission_duration = 1200  # 20 minutes
             surveillance_objects = scenario_gen.generate_coverage_scenario(nUAVs, params, mission_duration)
             metrics.objects_total = len(surveillance_objects)
             obstacles = generate_random_obstacles(5, params)
             params['obstacles'] = obstacles
             allow_glide = True
-            active_thermals = dict()
-            # Utiliser les positions home réelles avec bearing vers la zone de couverture
-            start_positions = {}
-            target_x = center_x + 2500.0
-            target_y = center_y + 2500.0
-            for u in range(nUAVs):
-                # Calculer le bearing vers la zone de couverture depuis la position home
-                dx = target_x - home_positions[u]['X']
-                dy = target_y - home_positions[u]['Y']
-                bearing_to_target = np.arctan2(dx, dy)
-                
-                start_positions[u] = {
-                    'X': home_positions[u]['X'],
-                    'Y': home_positions[u]['Y'],
-                    'Z': home_positions[u]['Z'] + 400.0,  # 400m au-dessus de home
-                    'bearing': bearing_to_target
-                }
-            end_position = {'X': target_x, 'Y': target_y, 'Z': center_z}
-            print(f"\n✓ Scénario couverture: {len(surveillance_objects)} objets, départ des positions home")
-        
-        # ========== THERMIQUES (si nécessaire) ==========
-        if scenario != TestScenario.ENDURANCE and allow_glide and scenario not in [TestScenario.PRELIMINARY_COLLISION, TestScenario.TRAJECTORY_OPTIMAL_POWERED, TestScenario.TRAJECTORY_OPTIMAL_GLIDE]:
-            thermal_map = ThermalMap()
             thermal_generator = ThermalGenerator(params)
-            thermal_evaluator = ThermalEvaluator(params, UAV_data)
             num_thermals = max(3, nUAVs // 2)
             active_thermals = thermal_generator.generate_random_thermals(
                 num_thermals, obstacles, params['current_simulation_time']
             )
             print(f'✓ {len(active_thermals)} thermiques actives')
-        elif scenario == TestScenario.ENDURANCE:
-            thermal_map = ThermalMap()
-            thermal_evaluator = ThermalEvaluator(params, UAV_data)
-        elif allow_glide:
-            # Pour les scénarios de trajectoire avec planeur, ajouter quelques thermiques
-            thermal_map = ThermalMap()
-            thermal_generator = ThermalGenerator(params)
-            thermal_evaluator = ThermalEvaluator(params, UAV_data)
-            num_thermals = max(2, nUAVs // 3)
-            active_thermals = thermal_generator.generate_random_thermals(
-                num_thermals, obstacles, params['current_simulation_time']
-            )
-            print(f'✓ {len(active_thermals)} thermiques actives')
-        else:
-            thermal_map = None
-            thermal_evaluator = None
+            
+            print(f"\n✓ Scénario couverture: {len(surveillance_objects)} objets à surveiller")
+        
         
         # ========== CALCULS ATMOSPHÉRIQUES ==========
         ACC_SEA_LEVEL = 9.80665
@@ -636,6 +637,9 @@ async def run_multi_uav_simulation():
         air_density = RHO_SEA_LEVEL * (T_fin / T_SEA_LEVEL)**(-grav_accel / (TROPO_LAPSE_RATE * R) - 1)
         
         # ========== INITIALISATION UAVs ==========
+        # Champ de vision pour détection d'objets et espacement trajectoires
+        fov_radius = 150.0
+        
         FLT_track = {k: {} for k in range(nUAVs)}
         FLT_track_keys = ['X', 'Y', 'Z', 'bearing', 'battery_capacity', 'flight_time', 
                           'flight_mode', 'in_evaluation', 'current_thermal_id', 'soaring_start_time']
@@ -689,7 +693,7 @@ async def run_multi_uav_simulation():
             FLT_track[u]['bearing'].append(initial_bearing)
             FLT_track[u]['battery_capacity'].append(UAV_data['maximum_battery_capacity'])
             FLT_track[u]['flight_time'].append(0.0)
-            FLT_track[u]['flight_mode'].append('glide' if allow_glide else 'powered')
+            FLT_track[u]['flight_mode'].append('glide' if allow_glide else 'engine')
             FLT_track[u]['in_evaluation'] = False
             FLT_track[u]['current_thermal_id'] = None
             FLT_track[u]['soaring_start_time'] = None
@@ -725,8 +729,24 @@ async def run_multi_uav_simulation():
         print("\n⚡ Génération des trajectoires en parallèle...")
         traj_start = time.perf_counter()
         
-        trajectory_tasks = [generate_trajectory_for_uav(u) for u in range(nUAVs)]
-        completed_uavs = await asyncio.gather(*trajectory_tasks)
+        # Pour le scénario COVERAGE, utiliser les trajectoires LawnMower
+        if scenario == TestScenario.COVERAGE:
+            print("\n🔷 Mode COVERAGE détecté - Génération trajectoires LawnMower...")
+            lawnmower_trajectories = generate_lawnmower_trajectories(
+                nUAVs, params, UAV_data, fov_radius
+            )
+            
+            # Assigner les trajectoires LawnMower aux GOAL_WPs
+            for u in range(nUAVs):
+                GOAL_WPs[u]['X'] = lawnmower_trajectories[u]['X']
+                GOAL_WPs[u]['Y'] = lawnmower_trajectories[u]['Y']
+                GOAL_WPs[u]['Z'] = lawnmower_trajectories[u]['Z']
+            
+            completed_uavs = list(range(nUAVs))
+        else:
+            # Pour les autres scénarios, utiliser la génération dynamique
+            trajectory_tasks = [generate_trajectory_for_uav(u) for u in range(nUAVs)]
+            completed_uavs = await asyncio.gather(*trajectory_tasks)
         
         traj_end = time.perf_counter()
         traj_time = traj_end - traj_start
@@ -760,9 +780,6 @@ async def run_multi_uav_simulation():
         
         # Horloge temps réel (pour statistiques seulement)
         real_time_start = time.perf_counter()
-        
-        # Champ de vision pour détection d'objets
-        fov_radius = 150.0
         
         print(f"\n⚙️  Configuration temps réel:")
         print(f"   Time step cible: {params['time_step']:.2f}s")
@@ -907,19 +924,47 @@ async def run_multi_uav_simulation():
         # ========== ANALYSE DES PERFORMANCES ==========
         analyzer = PerformanceAnalyzer()
         
-        # Calculer les métriques de trajectoire
-        path_metrics = analyzer.calculate_path_metrics(FLT_track, nUAVs)
+        # VALIDATION : Vérifier l'intégrité des données de vol avant analyse
+        print("\n🔍 Validation des données de vol...")
+        data_valid = True
         for u in range(nUAVs):
-            metrics.total_distance[u] = path_metrics[u]['distance']
-            metrics.path_length[u] = path_metrics[u]['waypoints']
+            x_len = len(FLT_track[u]['X'])
+            y_len = len(FLT_track[u]['Y'])
+            z_len = len(FLT_track[u]['Z'])
+            time_len = len(FLT_track[u]['flight_time'])
+            mode_len = len(FLT_track[u]['flight_mode'])
+            
+            if not (x_len == y_len == z_len == time_len == mode_len):
+                print(f"⚠️  UAV {u}: Longueurs incohérentes - X:{x_len}, Y:{y_len}, Z:{z_len}, time:{time_len}, mode:{mode_len}")
+                data_valid = False
+            
+            # Si flight_time est vide ou incomplet, le reconstruire
+            if time_len == 0 or time_len < x_len:
+                print(f"⚠️  UAV {u}: flight_time incomplet ({time_len}/{x_len}) - reconstruction...")
+                FLT_track[u]['flight_time'] = [i * params['time_step'] for i in range(x_len)]
+        
+        if data_valid:
+            print("✓ Données de vol validées")
+        
+        # Calculer les métriques de trajectoire
+        try:
+            path_metrics = analyzer.calculate_path_metrics(FLT_track, nUAVs)
+            for u in range(nUAVs):
+                metrics.total_distance[u] = path_metrics[u]['distance']
+                metrics.path_length[u] = path_metrics[u]['waypoints']
+        except Exception as e:
+            print(f"⚠️  Erreur calcul métriques trajectoire: {e}")
         
         # Calculer les métriques de temps
-        phase_times = analyzer.calculate_flight_phase_times(FLT_track, nUAVs)
-        for u in range(nUAVs):
-            metrics.total_flight_time[u] = phase_times[u]['total']
-            metrics.glide_time[u] = phase_times[u]['glide']
-            metrics.soar_time[u] = phase_times[u]['soar']
-            metrics.powered_time[u] = phase_times[u]['powered']
+        try:
+            phase_times = analyzer.calculate_flight_phase_times(FLT_track, nUAVs)
+            for u in range(nUAVs):
+                metrics.total_flight_time[u] = phase_times[u]['total']
+                metrics.glide_time[u] = phase_times[u]['glide']
+                metrics.soar_time[u] = phase_times[u]['soar']
+                metrics.powered_time[u] = phase_times[u]['powered']
+        except Exception as e:
+            print(f"⚠️  Erreur calcul métriques temps: {e}")
         
         # Calculer la distance minimale de séparation
         metrics.min_separation_distance = analyzer.check_min_separation(FLT_track, nUAVs)
@@ -932,7 +977,9 @@ async def run_multi_uav_simulation():
         
         # Analyser les thermiques pour le scénario d'endurance
         if scenario == TestScenario.ENDURANCE and len(active_thermals) > 0:
-            thermal_analysis = analyzer.analyze_thermal_exploitation(active_thermals, FLT_track, nUAVs)
+            # Convertir le dictionnaire de thermiques en liste pour l'analyse
+            thermals_list = list(active_thermals.values()) if isinstance(active_thermals, dict) else active_thermals
+            thermal_analysis = analyzer.analyze_thermal_exploitation(thermals_list, FLT_track, nUAVs)
             metrics.thermals_detected = thermal_analysis['detected']
             metrics.thermals_exploited = thermal_analysis['exploited']
             metrics.thermals_rejected = thermal_analysis['rejected']

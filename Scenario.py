@@ -3,22 +3,13 @@ Scénarios de test pour évaluation multi-UAV avec PX4 SITL
 Tests d'optimalité, d'endurance et de couverture
 """
 
-import asyncio
 import numpy as np
-from mavsdk import System
-from mavsdk.offboard import OffboardError, PositionNedYaw, VelocityNedYaw
-from mavsdk.telemetry import LandedState
-import time
-import pymap3d as pm
 from enum import Enum
 from dataclasses import dataclass, field
 from typing import List, Dict, Tuple
 import json
 
-# Importer vos modules existants
-from GoToWP import gotoWaypointMulti
-from compute import compute_distance_cartesian
-from trajectory import TrajectoryEvaluator, generate_random_obstacles, fix_trajectory, StraightLineTrajectory
+from trajectory import generate_random_obstacles
 
 
 class TestScenario(Enum):
@@ -106,42 +97,21 @@ class ScenarioGenerator:
         target_y = (params['Y_upper_bound'] + params['Y_lower_bound']) / 2
         target_z = 400.0
         
-        # Créer obstacle au centre pour forcer détour
+        num_vertices = np.random.randint(4, 6)  # Nombre de sommets pour le polygone
+        radius = np.random.uniform(100, 500)
+        vertices = []
+        for _ in range(num_vertices):
+            angle = np.random.uniform(0, 2 * np.pi)
+            x = target_x + radius * np.cos(angle)
+            y = target_y + radius * np.sin(angle)
+            vertices.append((x, y))
         center_obstacle = {
-            'X': target_x,
-            'Y': target_y,
-            'Z': target_z,
-            'radius': 150.0
+            'vertices': vertices,
         }
         
-        # Obstacles additionnels en cercle autour du centre
         obstacles = [center_obstacle]
-        num_ring_obstacles = 4
-        ring_radius = 300.0
-        for i in range(num_ring_obstacles):
-            angle = 2 * np.pi * i / num_ring_obstacles
-            obs_x = target_x + ring_radius * np.cos(angle)
-            obs_y = target_y + ring_radius * np.sin(angle)
-            obstacles.append({
-                'X': obs_x,
-                'Y': obs_y,
-                'Z': target_z,
-                'radius': 100.0
-            })
         
-        # Positions de départ en cercle autour de la cible
-        start_positions = {}
-        start_radius = 800.0
-        for u in range(nUAVs):
-            angle = 2 * np.pi * u / nUAVs
-            start_x = target_x + start_radius * np.cos(angle)
-            start_y = target_y + start_radius * np.sin(angle)
-            start_positions[u] = {
-                'X': start_x,
-                'Y': start_y,
-                'Z': target_z,
-                'bearing': angle + np.pi  # Pointe vers le centre
-            }
+        start_positions = {u: home_positions[u] for u in range(nUAVs)}
         
         end_position = {
             'X': target_x,
@@ -149,14 +119,12 @@ class ScenarioGenerator:
             'Z': target_z
         }
         
-        print(f"✓ Destination commune: ({target_x:.0f}, {target_y:.0f}, {target_z:.0f})")
-        print(f"✓ {len(obstacles)} obstacles générés (incluant obstacle central)")
-        print(f"✓ {nUAVs} positions de départ en cercle (rayon {start_radius:.0f}m)")
+        print(f"\n✓ Scénario collision: convergence vers ({target_x:.0f}, {target_y:.0f}, {target_z:.0f})")
         
         return start_positions, end_position, obstacles
     
     @staticmethod
-    def generate_trajectory_optimal_scenario(nUAVs: int, params: dict, allow_glide: bool = False) -> Tuple[dict, dict, list]:
+    def generate_trajectory_optimal_scenario(nUAVs: int, params: dict, home_positions: dict, allow_glide: bool) -> Tuple[dict, dict, dict]:
         """
         Scénarios 1 & 2 : Trajectoires optimales
         allow_glide=False : moteur allumé (scénario 1)
@@ -182,48 +150,10 @@ class ScenarioGenerator:
         
         # Générer obstacles variables (plus pour scénario 2)
         num_obstacles = 8 if allow_glide else 5
-        obstacles = []
-        for i in range(num_obstacles):
-            obs_x = np.random.uniform(test_zone['x_min'], test_zone['x_max'])
-            obs_y = np.random.uniform(test_zone['y_min'], test_zone['y_max'])
-            # Éviter obstacles trop proches de la destination
-            while np.sqrt((obs_x - target_x)**2 + (obs_y - target_y)**2) < 200:
-                obs_x = np.random.uniform(test_zone['x_min'], test_zone['x_max'])
-                obs_y = np.random.uniform(test_zone['y_min'], test_zone['y_max'])
-            
-            obstacles.append({
-                'X': obs_x,
-                'Y': obs_y,
-                'Z': target_z,
-                'radius': np.random.uniform(80, 120) if allow_glide else 100.0
-            })
+        obstacles = generate_random_obstacles(num_obstacles, params)
         
         # Positions de départ (identiques ou non)
-        start_positions = {}
-        use_same_start = np.random.choice([True, False])
-        
-        if use_same_start:
-            # Départ commun
-            start_x = test_zone['x_min'] + 100
-            start_y = test_zone['y_min'] + 100
-            for u in range(nUAVs):
-                start_positions[u] = {
-                    'X': start_x + u * 50,  # Légèrement décalés
-                    'Y': start_y + u * 50,
-                    'Z': target_z,
-                    'bearing': 0.0
-                }
-        else:
-            # Départs différents
-            for u in range(nUAVs):
-                start_x = np.random.uniform(test_zone['x_min'], test_zone['x_min'] + 500)
-                start_y = np.random.uniform(test_zone['y_min'], test_zone['y_max'])
-                start_positions[u] = {
-                    'X': start_x,
-                    'Y': start_y,
-                    'Z': target_z,
-                    'bearing': 0.0
-                }
+        start_positions = {u: home_positions[u] for u in range(nUAVs)}
         
         end_position = {
             'X': target_x,
@@ -233,13 +163,12 @@ class ScenarioGenerator:
         
         print(f"✓ Mode: {'Planeur autorisé' if allow_glide else 'Propulsion continue'}")
         print(f"✓ Destination commune: ({target_x:.0f}, {target_y:.0f})")
-        print(f"✓ {num_obstacles} obstacles (rayon variable)" if allow_glide else f"✓ {num_obstacles} obstacles (rayon 100m)")
-        print(f"✓ Départs: {'Communs' if use_same_start else 'Différents'}")
+        print(f"✓ {num_obstacles} obstacles ")
         
         return start_positions, end_position, obstacles
     
     @staticmethod
-    def generate_endurance_scenario(nUAVs: int, params: dict, thermal_generator, obstacles) -> Tuple[list, dict]:
+    def generate_endurance_scenario(nUAVs: int, params: dict, thermal_generator, obstacles) -> Tuple[dict, dict]:
         """
         Scénario d'endurance : évaluation exploitation thermiques
         """
@@ -507,6 +436,15 @@ class PerformanceAnalyzer:
     @staticmethod
     def save_metrics_to_file(metrics: PerformanceMetrics, filename: str):
         """Sauvegarder les métriques dans un fichier JSON"""
+        import os
+        
+        # Créer le dossier multi_uav_logs s'il n'existe pas
+        log_dir = '/home/pix4/GoToWP/multi_uav_logs'
+        os.makedirs(log_dir, exist_ok=True)
+        
+        # Construire le chemin complet
+        filepath = os.path.join(log_dir, filename)
+        
         data = {
             'scenario_name': metrics.scenario_name,
             'num_uavs': metrics.num_uavs,
@@ -531,9 +469,9 @@ class PerformanceAnalyzer:
             'detection_rate': metrics.detection_rate
         }
         
-        with open(filename, 'w') as f:
+        with open(filepath, 'w') as f:
             json.dump(data, f, indent=4)
-        print(f"\n✓ Métriques sauvegardées dans {filename}")
+        print(f"\n✓ Métriques sauvegardées dans {filepath}")
 
 
 def select_scenario() -> TestScenario:

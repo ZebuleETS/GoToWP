@@ -418,6 +418,10 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
             dZ = FLT_data[u]['airspeed']*t_step
             pridction_distance = (abs(UBz - FLT_data[u]['Z']) / dZ)*FLT_data[u]['airspeed'] if dZ != 0 else FLT_data[u]['airspeed'] * t_step
         
+        else:
+            # Pour les modes 'soar', 'eval', ou autres : prédiction simple basée sur la vitesse
+            pridction_distance = FLT_data[u]['airspeed'] * t_step
+        
         REF = dict()
         REF['X'] = FLT_data[u]['X']
         REF['Y'] = FLT_data[u]['Y']
@@ -642,6 +646,12 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
         FLT_track[Uidx]['flight_mode'].append('glide')
 
     FLT_track[Uidx]['battery_capacity'].append(candidate_sol['battery_capacity'][idx])
+    
+    # Mettre à jour le temps de vol
+    if len(FLT_track[Uidx]['flight_time']) > 0:
+        FLT_track[Uidx]['flight_time'].append(FLT_track[Uidx]['flight_time'][-1] + params['time_step'])
+    else:
+        FLT_track[Uidx]['flight_time'].append(params['time_step'])
 
     FLT_conditions[Uidx]['airspeed'] = candidate_sol['airspeed'][idx]
     FLT_conditions[Uidx]['flight_path_angle'] = candidate_sol['flight_path_angle'][idx]
@@ -853,6 +863,12 @@ def soarThermal(FLT_track, FLT_conditions, SOAR_WPs, nUAVs, Uidx, params, UAV_da
     FLT_track[Uidx]['flight_mode'].append('soaring')
     FLT_track[Uidx]['battery_capacity'].append(FLT_data[Uidx]['battery_capacity'])
     
+    # Mettre à jour le temps de vol
+    if len(FLT_track[Uidx]['flight_time']) > 0:
+        FLT_track[Uidx]['flight_time'].append(FLT_track[Uidx]['flight_time'][-1] + params['time_step'])
+    else:
+        FLT_track[Uidx]['flight_time'].append(params['time_step'])
+    
     # Mettre à jour les conditions de vol avec les valeurs dynamiques
     FLT_conditions[Uidx]['airspeed'] = airspeed
     FLT_conditions[Uidx]['flight_path_angle'] = dynamic_flight_path_angle  # En radians
@@ -1026,6 +1042,12 @@ def EvalThermal(FLT_track, FLT_conditions, EVAL_WPs, nUAVs, Uidx, params, UAV_da
         FLT_track[Uidx]['flight_mode'].append('glide')
 
     FLT_track[Uidx]['battery_capacity'].append(new_battery)
+    
+    # Mettre à jour le temps de vol
+    if len(FLT_track[Uidx]['flight_time']) > 0:
+        FLT_track[Uidx]['flight_time'].append(FLT_track[Uidx]['flight_time'][-1] + params['time_step'])
+    else:
+        FLT_track[Uidx]['flight_time'].append(params['time_step'])
 
     # Affichage en degrés pour le debug
     print(f"UAV {Uidx}: Eval pos=({x_new:.1f}, {y_new:.1f}, {z_new:.1f}), "
