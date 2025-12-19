@@ -623,6 +623,25 @@ def is_point_in_obstacle(point, obstacle):
     # Vérifier si le point est à l'intérieur des limites du polygone
     return point_in_polygon((point['X'], point['Y']), obstacle['vertices'])
 
+def is_point_in_thermal(point, thermal):
+    """
+    Vérifie si un point est à l'intérieur d'un thermique cylindrique.
+    
+    Args:
+        point (dict): Point à vérifier {X, Y, Z}
+        thermal (dict): Obstacle cylindrique {X, Y, radius}
+        
+    Returns:
+        bool: True si le point est dans l'obstacle, False sinon
+    """
+    # Vérifier si le point est à l'intérieur des limites de la thermal
+    dx = point['X'] - thermal['X']
+    dy = point['Y'] - thermal['Y']
+    horizontal_distance = np.sqrt(dx**2 + dy**2)
+    
+    # Le point est dans le thermique si la distance horizontale est inférieure ou égale au rayon
+    return horizontal_distance <= thermal['radius']
+
 def check_segment_obstacle_collision(start_point, end_point, obstacle, num_checks=10):
     """
     Vérifie si un segment de ligne entre deux points traverse un obstacle.
@@ -755,7 +774,7 @@ def find_nearest_waypoint(current_pos, GOAL_WPs, obstacles, exit_thermal, wp_idx
                 'Y': exit_thermal.y,
                 'radius': exit_thermal.radius
             }
-            if is_point_in_obstacle(waypoint, thermal):
+            if is_point_in_thermal(waypoint, thermal):
                 is_valid = False
         
         if is_valid:

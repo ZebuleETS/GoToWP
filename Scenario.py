@@ -83,7 +83,7 @@ class ScenarioGenerator:
     """Générateur de scénarios de test"""
     
     @staticmethod
-    def generate_preliminary_collision_scenario(nUAVs: int, params: dict) -> Tuple[dict, dict, list]:
+    def generate_preliminary_collision_scenario(nUAVs: int, params: dict, home_positions: dict) -> Tuple[dict, dict, list]:
         """
         Scénario préliminaire : collision garantie à 100%
         Tous les drones convergent vers le même point avec obstacles au milieu
@@ -108,6 +108,9 @@ class ScenarioGenerator:
         center_obstacle = {
             'vertices': vertices,
         }
+        print(f"✓ Obstacle central généré avec {num_vertices} sommets et rayon ~{radius:.0f}m")
+        print( center_obstacle['vertices'])
+        print(type(center_obstacle["vertices"]))
         
         obstacles = [center_obstacle]
         

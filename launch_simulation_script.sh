@@ -93,7 +93,7 @@ echo -e "==========================================${NC}"
 cd $PX4_DIR
 
 # Lancer Gazebo avec le premier drone
-make px4_sitl gz_rc_cessna > $LOG_DIR/gazebo.log 2>&1 &
+HEADLESS=1 make px4_sitl_default gz_rc_cessna > $LOG_DIR/gazebo.log 2>&1 &
 GAZEBO_PID=$!
 echo -e "${GREEN}✓ Gazebo lancé (PID: $GAZEBO_PID)${NC}"
 sleep 10
@@ -151,8 +151,8 @@ for ((i=1; i<$NUM_UAVS; i++)); do
 done
 
 # Attendre que tous soient initialisés
-echo -e "\n${YELLOW}Attente de l'initialisation complète (15s)...${NC}"
-sleep 15
+echo -e "\n${YELLOW}Attente de l'initialisation complète (10s)...${NC}"
+sleep 10
 
 # Vérifier que tous les processus tournent
 echo -e "\n${BLUE}Vérification des processus...${NC}"
@@ -202,6 +202,7 @@ echo -e "${YELLOW}Appuyez sur Entrée pour lancer la simulation Python...${NC}"
 read
 
 # Lancer le script Python
+source /home/pix4/GoToWP/Mav/bin/activate
 python3 /home/pix4/GoToWP/dronePx4.py
 
 # Nettoyage final
