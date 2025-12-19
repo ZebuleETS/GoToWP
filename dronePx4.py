@@ -109,6 +109,9 @@ class PX4SITLBridge:
                     self.last_position_ned,
                     self.last_velocity_ned
                 )
+                await self.drone.offboard.set_velocity_ned(
+                    self.last_velocity_ned
+                )
                 await asyncio.sleep(0.05)  # 20Hz pour la sécurité (minimum requis: 2Hz)
         except asyncio.CancelledError:
             print(f"[UAV {self.uav_id}] Arrêt keepalive offboard")
@@ -430,7 +433,7 @@ def generate_lawnmower_trajectories(nUAVs, params, UAV_data, fov_radius):
     x_max = params['X_upper_bound']
     y_min = params['Y_lower_bound']
     y_max = params['Y_upper_bound']
-    altitude = param['working_floor']
+    altitude = params['working_floor']
     
     coverage_area = {
         'X_min': x_min,
@@ -620,7 +623,7 @@ async def run_multi_uav_simulation():
                 num_thermals, obstacles, params['current_simulation_time']
             )
             print(f'✓ {len(active_thermals)} thermiques actives')
-            
+            start_positions = {u: home_positions[u] for u in range(nUAVs)}
             print(f"\n✓ Scénario couverture: {len(surveillance_objects)} objets à surveiller")
         
         
@@ -676,9 +679,10 @@ async def run_multi_uav_simulation():
             FLT_conditions[u]['air_density'] = air_density
             FLT_conditions[u]['battery_capacity'] = UAV_data['maximum_battery_capacity']
 
-            END_WPs[u]['X'].append(end_position['X'])
-            END_WPs[u]['Y'].append(end_position['Y'])
-            END_WPs[u]['Z'].append(end_position['Z'])
+            if scenario != TestScenario.COVERAGE:
+                END_WPs[u]['X'].append(end_position['X'])
+                END_WPs[u]['Y'].append(end_position['Y'])
+                END_WPs[u]['Z'].append(end_position['Z'])
 
             # Utiliser les positions de départ du scénario (basées sur home positions)
             initial_x = start_positions[u]['X']
@@ -856,6 +860,13 @@ async def run_multi_uav_simulation():
             
             # Mise à jour PX4 pour tous les UAVs
             await controller.update_all_from_simulation(FLT_track, FLT_conditions)
+            
+            # Verification atterissage d'urgence (batterie faible)
+            for u in range(nUAVs):
+                if FLT_track[u]['battery_capacity'][-1] <= UAV_data['desired_reserved_battery_capacity']:
+                    print(f"\n⚠️  UAV {u} batterie faible ({FLT_track[u]['battery_capacity'][-1]:.1f}Ah) - Atterrissage d'urgence!")
+                    await controller.bridges[u].return_and_land()
+                    
             
             # Affichage périodique
             if iteration % 5 == 0:

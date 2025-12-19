@@ -295,9 +295,9 @@ class LawnMowerTrajectory(TrajectoryGenerator):
                 waypoints_z.append(altitude)
         
         return {
-            'X': waypoints_x.tolist(),
-            'Y': waypoints_y.tolist(),
-            'Z': waypoints_z.tolist()
+            'X': waypoints_x,
+            'Y': waypoints_y,
+            'Z': waypoints_z
         }
 
     

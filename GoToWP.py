@@ -264,13 +264,13 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
         # Définir les angles de trajectoire pour chaque mode
         climb_angle = calculate_optimal_climb_angle(UAV_data, FLT_conditions[Uidx])
         level_angle = 0
-        descent_angle = np.deg2rad(-5)
+        #descent_angle = np.deg2rad(-5)
         
         # Pré-calculer les constantes trigonométriques et valeurs communes
         cos_climb = np.cos(climb_angle)
         sin_climb = np.sin(climb_angle)
-        cos_descent = np.cos(descent_angle)
-        sin_descent = np.sin(descent_angle)
+        #cos_descent = np.cos(descent_angle)
+        #sin_descent = np.sin(descent_angle)
         current_z = FLT_data[Uidx]['Z']
         delta_z_up = abs(UBz - current_z)
         delta_z_down = abs(current_z - LBz)
@@ -359,47 +359,47 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
                 PB_temp['Y'].append(y_pred_level)
                 PB_temp['Z'].append(FLT_data[Uidx]['Z'])
                 
-                # 3. DESCENTE CONTRÔLÉE AVEC MOTEUR
-                FLT_conditions[Uidx]['flight_path_angle'] = descent_angle
-                
-                # Calculer la distance parcourue et le changement d'altitude (utiliser constantes pré-calculées)
-                horizontal_distance = V[j] * t_step * cos_descent
-                altitude_change = V[j] * t_step * sin_descent  # Négatif car descente
-                
-                # Calculer la consommation d'énergie pour la descente contrôlée
-                pwr_descent = get_power_consumption(UAV_data, FLT_conditions[Uidx])
-                power_consumption_descent = pwr_descent * (t_step / 3600)
-                
-                # Calculer la nouvelle position (réutiliser REF)
-                x_new_descent, y_new_descent = get_destination_from_range_and_bearing_cartesian(REF, horizontal_distance, H[i])
-                
-                # Validation
-                if np.isnan(x_new_descent) or np.isnan(y_new_descent):
-                    print(f"UAV {Uidx} ENGINE-DESCENT: NaN position - dist={horizontal_distance:.2f}, H[{i}]={H[i]:.3f}")
-                    continue
-                
-                alt_descent = min(max(FLT_data[Uidx]['Z'] + altitude_change, LBz), UBz)
-                
-                if np.isnan(alt_descent):
-                    print(f"UAV {Uidx} ENGINE-DESCENT: NaN altitude - Z={FLT_data[Uidx]['Z']:.1f}, change={altitude_change:.2f}")
-                    continue
-                
-                # Ajouter le candidat pour la descente
-                candidate_sol['X'].append(x_new_descent)
-                candidate_sol['Y'].append(y_new_descent)
-                candidate_sol['Z'].append(alt_descent)
-                candidate_sol['bearing'].append(H[i])
-                candidate_sol['battery_capacity'].append(FLT_data[Uidx]['battery_capacity'] - power_consumption_descent)
-                candidate_sol['flight_mode'].append('engine')
-                candidate_sol['airspeed'].append(V[j])
-                candidate_sol['flight_path_angle'].append(descent_angle)
-                
-                # Prédiction pour collision (réutiliser delta_z_down)
-                pridction_distance = (delta_z_down / abs(altitude_change)) * horizontal_distance if abs(altitude_change) > 1e-6 else V[j] * t_step
-                x_pred_descent, y_pred_descent = get_destination_from_range_and_bearing_cartesian(REF, pridction_distance, H[i])
-                PB_temp['X'].append(x_pred_descent)
-                PB_temp['Y'].append(y_pred_descent)
-                PB_temp['Z'].append(LBz)
+                ## 3. DESCENTE CONTRÔLÉE AVEC MOTEUR
+                #FLT_conditions[Uidx]['flight_path_angle'] = descent_angle
+                #
+                ## Calculer la distance parcourue et le changement d'altitude (utiliser constantes pré-calculées)
+                #horizontal_distance = V[j] * t_step * cos_descent
+                #altitude_change = V[j] * t_step * sin_descent  # Négatif car descente
+                #
+                ## Calculer la consommation d'énergie pour la descente contrôlée
+                #pwr_descent = get_power_consumption(UAV_data, FLT_conditions[Uidx])
+                #power_consumption_descent = pwr_descent * (t_step / 3600)
+                #
+                ## Calculer la nouvelle position (réutiliser REF)
+                #x_new_descent, y_new_descent = get_destination_from_range_and_bearing_cartesian(REF, horizontal_distance, H[i])
+                #
+                ## Validation
+                #if np.isnan(x_new_descent) or np.isnan(y_new_descent):
+                #    print(f"UAV {Uidx} ENGINE-DESCENT: NaN position - dist={horizontal_distance:.2f}, H[{i}]={H[i]:.3f}")
+                #    continue
+                #
+                #alt_descent = min(max(FLT_data[Uidx]['Z'] + altitude_change, LBz), UBz)
+                #
+                #if np.isnan(alt_descent):
+                #    print(f"UAV {Uidx} ENGINE-DESCENT: NaN altitude - Z={FLT_data[Uidx]['Z']:.1f}, change={altitude_change:.2f}")
+                #    continue
+                #
+                ## Ajouter le candidat pour la descente
+                #candidate_sol['X'].append(x_new_descent)
+                #candidate_sol['Y'].append(y_new_descent)
+                #candidate_sol['Z'].append(alt_descent)
+                #candidate_sol['bearing'].append(H[i])
+                #candidate_sol['battery_capacity'].append(FLT_data[Uidx]['battery_capacity'] - power_consumption_descent)
+                #candidate_sol['flight_mode'].append('engine')
+                #candidate_sol['airspeed'].append(V[j])
+                #candidate_sol['flight_path_angle'].append(descent_angle)
+                #
+                ## Prédiction pour collision (réutiliser delta_z_down)
+                #pridction_distance = (delta_z_down / abs(altitude_change)) * horizontal_distance if abs(altitude_change) > 1e-6 else V[j] * t_step
+                #x_pred_descent, y_pred_descent = get_destination_from_range_and_bearing_cartesian(REF, pridction_distance, H[i])
+                #PB_temp['X'].append(x_pred_descent)
+                #PB_temp['Y'].append(y_pred_descent)
+                #PB_temp['Z'].append(LBz)
 
 
     # Check for obstacles and compute safety constraints
