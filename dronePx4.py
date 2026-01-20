@@ -89,7 +89,7 @@ class PX4SITLBridge:
         print(f"[UAV {self.uav_id}] Décollage...")
         await self.drone.action.takeoff()
         
-        target_alt = 400
+        target_alt = self.params['working_floor']
         async for position in self.drone.telemetry.position():
             current_alt = position.relative_altitude_m
             print(f"[UAV {self.uav_id}] Altitude actuelle: {current_alt:.1f}m / {target_alt:.1f}m", end='\r')
@@ -508,8 +508,12 @@ async def run_multi_uav_simulation():
     params['current_simulation_time'] = 0.0
     params['time_step'] = 1.1  # Time step cible pour synchronisation temps réel (secondes)
     params['target_real_time_per_iteration'] = 1.1  # Temps réel cible par itération
-    params['bearing_step'] = 4  # Réduit de 10 à 5 pour accélérer (50% moins de calculs)
-    params['speed_step'] = 3  # Réduit de 10 à 3 pour accélérer (70% moins de calculs)
+    # Steps pour mode glide (génère moins de candidats, on peut augmenter)
+    params['bearing_step_glide'] = 6
+    params['speed_step_glide'] = 5
+    # Steps pour mode engine (génère plus de candidats, on garde des valeurs plus basses)
+    params['bearing_step_engine'] = 4
+    params['speed_step_engine'] = 3
     params['safe_distance'] = 30.0
     params['horizon_length'] = 100.0
     params['adaptive_resolution'] = True  # Ajuster automatiquement la résolution si trop lent
@@ -594,19 +598,7 @@ async def run_multi_uav_simulation():
             metrics.thermals_generated = len(active_thermals)
             allow_glide = True
             # Utiliser les positions home réelles avec bearing vers le centre
-            start_positions = {}
-            for u in range(nUAVs):
-                # Calculer le bearing vers le centre depuis la position home
-                dx = center_x - home_positions[u]['X']
-                dy = center_y - home_positions[u]['Y']
-                bearing_to_center = np.arctan2(dx, dy)
-                
-                start_positions[u] = {
-                    'X': home_positions[u]['X'],
-                    'Y': home_positions[u]['Y'],
-                    'Z': home_positions[u]['Z'] + 400.0,  # 400m au-dessus de home
-                    'bearing': bearing_to_center
-                }
+            start_positions = {u: home_positions[u] for u in range(nUAVs)}
             end_position = {'X': center_x, 'Y': center_y, 'Z': center_z}
             print(f"\n✓ Scénario endurance: {len(active_thermals)} thermiques, départ des positions home")
         
@@ -687,7 +679,7 @@ async def run_multi_uav_simulation():
             # Utiliser les positions de départ du scénario (basées sur home positions)
             initial_x = start_positions[u]['X']
             initial_y = start_positions[u]['Y']
-            initial_z = start_positions[u]['Z']
+            initial_z = start_positions[u]['Z'] + params['working_floor']
             initial_bearing = start_positions[u]['bearing']
             print(f"UAV {u} départ (E,N,U): ({initial_x:.1f}, {initial_y:.1f}, {initial_z:.1f}) cap: {np.degrees(initial_bearing):.0f}°")
             
@@ -787,8 +779,8 @@ async def run_multi_uav_simulation():
         
         print(f"\n⚙️  Configuration temps réel:")
         print(f"   Time step cible: {params['time_step']:.2f}s")
-        print(f"   Bearing steps: {params['bearing_step']} (optimisé pour temps réel)")
-        print(f"   Speed steps: {params['speed_step']} (optimisé pour temps réel)")
+        print(f"   Bearing steps - Glide: {params['bearing_step_glide']}, Engine: {params['bearing_step_engine']}")
+        print(f"   Speed steps - Glide: {params['speed_step_glide']}, Engine: {params['speed_step_engine']}")
         print(f"   Résolution adaptive: {'Activée' if params['adaptive_resolution'] else 'Désactivée'}")
         print("   → Objectif: calcul en ~{:.0f}ms pour réactivité maximale\n".format(params['target_real_time_per_iteration']*1000))
         
@@ -825,12 +817,18 @@ async def run_multi_uav_simulation():
             # SYNCHRONISATION TEMPS RÉEL INTELLIGENTE
             # Si le calcul est trop lent, réduire la résolution adaptativement
             if params['adaptive_resolution'] and algo_execution_time > params['target_real_time_per_iteration'] * 2:
-                if params['bearing_step'] > 3:
-                    params['bearing_step'] = max(3, params['bearing_step'] - 1)
-                    print(f"⚠️  Calcul trop lent ({algo_execution_time:.2f}s) - Réduction bearing_step à {params['bearing_step']}")
-                if params['speed_step'] > 2:
-                    params['speed_step'] = max(2, params['speed_step'] - 1)
-                    print(f"⚠️  Calcul trop lent - Réduction speed_step à {params['speed_step']}")
+                if params['bearing_step_glide'] > 4:
+                    params['bearing_step_glide'] = max(4, params['bearing_step_glide'] - 1)
+                    print(f"⚠️  Calcul trop lent ({algo_execution_time:.2f}s) - Réduction bearing_step_glide à {params['bearing_step_glide']}")
+                if params['bearing_step_engine'] > 3:
+                    params['bearing_step_engine'] = max(3, params['bearing_step_engine'] - 1)
+                    print(f"⚠️  Calcul trop lent - Réduction bearing_step_engine à {params['bearing_step_engine']}")
+                if params['speed_step_glide'] > 3:
+                    params['speed_step_glide'] = max(3, params['speed_step_glide'] - 1)
+                    print(f"⚠️  Calcul trop lent - Réduction speed_step_glide à {params['speed_step_glide']}")
+                if params['speed_step_engine'] > 2:
+                    params['speed_step_engine'] = max(2, params['speed_step_engine'] - 1)
+                    print(f"⚠️  Calcul trop lent - Réduction speed_step_engine à {params['speed_step_engine']}")
             
             # Mettre à jour le temps de simulation
             params['current_simulation_time'] += params['time_step']
@@ -893,7 +891,7 @@ async def run_multi_uav_simulation():
                 print(f"[Simulation: {current_time:.1f}s | Réel: {total_real_time:.1f}s | Iter: {iteration}]")
                 print(f"  Temps calcul: {avg_algo_time:.1f}ms (objectif: {params['target_real_time_per_iteration']*1000:.0f}ms)")
                 print(f"  Sync temps réel: {sync_ratio:.2f}x {sync_status}")
-                print(f"  Décalage: {sync_delay:+.2f}s | Steps: B={params['bearing_step']}, V={params['speed_step']}")
+                print(f"  Décalage: {sync_delay:+.2f}s | Steps G: B={params['bearing_step_glide']}, V={params['speed_step_glide']} | E: B={params['bearing_step_engine']}, V={params['speed_step_engine']}")
                 print(f"{'='*70}")
                 
                 for u in range(nUAVs):

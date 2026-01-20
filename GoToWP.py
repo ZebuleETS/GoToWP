@@ -157,8 +157,13 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
     UBz = params['Z_upper_bound']
     Tsim_current = params['current_simulation_time']
     t_step = params['time_step']
-    h_step = params['bearing_step']
-    v_step = params['speed_step']
+    # Sélectionner les steps en fonction du mode de vol actuel
+    if FLT_track[Uidx]['flight_mode'][-1] == 'glide':
+        h_step = params['bearing_step_glide']
+        v_step = params['speed_step_glide']
+    else:  # 'engine' ou autre mode
+        h_step = params['bearing_step_engine']
+        v_step = params['speed_step_engine']
     max_turn_rate = UAV_data['max_turn_rate']
     min_velocity = UAV_data['min_airspeed']
     max_velocity = UAV_data['max_airspeed']
@@ -199,17 +204,6 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
 
     # Obtention des données de vol actuelles
     FLT_data = get_current_flight_data(FLT_track, FLT_conditions, nUAVs)
-    
-    # VALIDATION : Vérifier que les données d'entrée sont valides
-    if np.isnan(FLT_data[Uidx]['X']) or np.isnan(FLT_data[Uidx]['Y']) or np.isnan(FLT_data[Uidx]['Z']):
-        print(f"❌ UAV {Uidx}: Données de vol invalides en entrée!")
-        print(f"   Position: ({FLT_data[Uidx]['X']}, {FLT_data[Uidx]['Y']}, {FLT_data[Uidx]['Z']})")
-        return FLT_track, FLT_conditions, current_wp_idx
-    
-    if np.isnan(FLT_data[Uidx]['bearing']) or np.isnan(FLT_data[Uidx]['airspeed']):
-        print(f"❌ UAV {Uidx}: Bearing ou airspeed invalide!")
-        print(f"   Bearing: {FLT_data[Uidx]['bearing']}, Airspeed: {FLT_data[Uidx]['airspeed']}")
-        return FLT_track, FLT_conditions, current_wp_idx
     
     Hr = np.linspace(FLT_data[Uidx]['bearing'], FLT_data[Uidx]['bearing'] + max_turn_rate, h_step)
     Hl = np.linspace(FLT_data[Uidx]['bearing'] - max_turn_rate, FLT_data[Uidx]['bearing'], h_step)
@@ -263,6 +257,12 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
         
         # Définir les angles de trajectoire pour chaque mode
         climb_angle = calculate_optimal_climb_angle(UAV_data, FLT_conditions[Uidx])
+        
+        # VALIDATION: Vérifier que climb_angle est valide
+        if np.isnan(climb_angle) or np.isinf(climb_angle):
+            print(f"⚠️  UAV {Uidx}: climb_angle invalide ({climb_angle}), utilisation angle par défaut de 5°")
+            climb_angle = np.deg2rad(5.0)  # Angle de montée par défaut
+        
         level_angle = 0
         #descent_angle = np.deg2rad(-5)
         
@@ -278,6 +278,15 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
         # Pour chaque cap possible
         for i in range(len(H)):
             for j in range(len(V)):
+                # VALIDATION: Vérifier que V[j] est valide
+                if np.isnan(V[j]) or np.isinf(V[j]) or V[j] <= 0:
+                    print(f"⚠️  UAV {Uidx}: V[{j}]={V[j]} invalide, skip")
+                    continue
+                
+                if np.isnan(H[i]) or np.isinf(H[i]):
+                    print(f"⚠️  UAV {Uidx}: H[{i}]={H[i]} invalide, skip")
+                    continue
+                
                 FLT_conditions[Uidx]['airspeed'] = V[j]
                 FLT_conditions[Uidx]['airspeed_dot'] = 0.0
                 
@@ -286,6 +295,11 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
                 
                 # Calculer la distance parcourue et le changement d'altitude (utiliser constantes pré-calculées)
                 horizontal_distance = V[j] * t_step * cos_climb
+                
+                # VALIDATION: Vérifier que horizontal_distance est valide
+                if np.isnan(horizontal_distance) or np.isinf(horizontal_distance):
+                    print(f"⚠️  UAV {Uidx}: horizontal_distance={horizontal_distance} invalide (V={V[j]}, t_step={t_step}, cos_climb={cos_climb}), skip")
+                    continue
                 altitude_change = V[j] * t_step * sin_climb
                 
                 # Calculer la consommation d'énergie pour la montée
@@ -607,6 +621,7 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
             print(f"   Premier candidat: ({candidate_sol['X'][0]:.1f}, {candidate_sol['Y'][0]:.1f}, {candidate_sol['Z'][0]:.1f})")
     
     DM = np.column_stack([C_safety, C_distance, C_energy, C_sink, C_obstacle])
+    #DM = np.column_stack([C_safety, C_energy, C_sink, C_obstacle])
     ranked_indices = decision_making(DM)
     idx = ranked_indices[0]  # Meilleur candidat selon le classement
     

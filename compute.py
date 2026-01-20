@@ -566,19 +566,21 @@ def calculate_optimal_climb_angle(UAV_data, flight_conditions):
     
     # Calculer l'angle de montée théorique maximal basé sur la puissance excédentaire
     velocity = flight_conditions['airspeed']
-    max_climb_angle_theory = np.arcsin(excess_power / (weight * velocity))
+    climb_ratio = excess_power / (weight * velocity)
     
-    # Vérifier le ratio portance/traînée comme contrainte additionnelle
-    lift_drag_ratio = get_lift_to_drag(UAV_data, test_conditions)
-    max_aero_angle = np.arctan(1 / lift_drag_ratio)
+    if climb_ratio >= 1.0:
+        # Montée quasi-verticale théoriquement possible - contrainte aéro prendra le relais
+        max_climb_angle_theory = np.deg2rad(85)  # Angle très élevé mais physiquement réaliste
+    else:
+        # Cas normal : calcul de l'angle via arcsin (ratio < 1)
+        max_climb_angle_theory = np.arcsin(climb_ratio)
+
+    max_allowed_angle = np.deg2rad(15)  # Limite pratique pour éviter le décrochage
     
-    # Prendre le minimum entre l'angle théorique et l'angle aérodynamique maximum
-    calculated_angle = min(max_climb_angle_theory, max_aero_angle)
+    # Prendre le minimum entre l'angle théorique (puissance) et l'angle pratique (aéro)
+    calculated_angle = min(max_climb_angle_theory, max_allowed_angle)
     
-    # Limiter à une valeur raisonnable pour un drone à voilure fixe
-    max_allowed_angle = np.deg2rad(15)
-    
-    return min(calculated_angle, max_allowed_angle)
+    return calculated_angle
 
 def point_in_polygon(point, vertices):
     """
