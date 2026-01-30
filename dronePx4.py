@@ -509,7 +509,7 @@ async def run_multi_uav_simulation():
     params['time_step'] = 1.1  # Time step cible pour synchronisation temps réel (secondes)
     params['target_real_time_per_iteration'] = 1.1  # Temps réel cible par itération
     # Steps pour mode glide (génère moins de candidats, on peut augmenter)
-    params['bearing_step_glide'] = 6
+    params['bearing_step_glide'] = 5
     params['speed_step_glide'] = 5
     # Steps pour mode engine (génère plus de candidats, on garde des valeurs plus basses)
     params['bearing_step_engine'] = 4
@@ -517,6 +517,10 @@ async def run_multi_uav_simulation():
     params['safe_distance'] = 30.0
     params['horizon_length'] = 100.0
     params['adaptive_resolution'] = True  # Ajuster automatiquement la résolution si trop lent
+    # Coefficient alpha (>1) pour augmenter la priorité d'un critère de décision
+    # En mode glide : augmente la priorité de minimiser la descente (C_sink)
+    # En mode engine : augmente la priorité de minimiser la consommation (C_energy)
+    params['alpha'] = 2  # Valeur: entre 1.0 et 3.0
     
     # Initialiser métriques de performance
     metrics = PerformanceMetrics(
@@ -820,15 +824,15 @@ async def run_multi_uav_simulation():
                 if params['bearing_step_glide'] > 4:
                     params['bearing_step_glide'] = max(4, params['bearing_step_glide'] - 1)
                     print(f"⚠️  Calcul trop lent ({algo_execution_time:.2f}s) - Réduction bearing_step_glide à {params['bearing_step_glide']}")
-                if params['bearing_step_engine'] > 3:
-                    params['bearing_step_engine'] = max(3, params['bearing_step_engine'] - 1)
-                    print(f"⚠️  Calcul trop lent - Réduction bearing_step_engine à {params['bearing_step_engine']}")
+                #if params['bearing_step_engine'] > 3:
+                #    params['bearing_step_engine'] = max(3, params['bearing_step_engine'] - 1)
+                #    print(f"⚠️  Calcul trop lent - Réduction bearing_step_engine à {params['bearing_step_engine']}")
                 if params['speed_step_glide'] > 3:
                     params['speed_step_glide'] = max(3, params['speed_step_glide'] - 1)
                     print(f"⚠️  Calcul trop lent - Réduction speed_step_glide à {params['speed_step_glide']}")
-                if params['speed_step_engine'] > 2:
-                    params['speed_step_engine'] = max(2, params['speed_step_engine'] - 1)
-                    print(f"⚠️  Calcul trop lent - Réduction speed_step_engine à {params['speed_step_engine']}")
+                #if params['speed_step_engine'] > 2:
+                #    params['speed_step_engine'] = max(2, params['speed_step_engine'] - 1)
+                #    print(f"⚠️  Calcul trop lent - Réduction speed_step_engine à {params['speed_step_engine']}")
             
             # Mettre à jour le temps de simulation
             params['current_simulation_time'] += params['time_step']
@@ -971,7 +975,7 @@ async def run_multi_uav_simulation():
                 metrics.total_flight_time[u] = phase_times[u]['total']
                 metrics.glide_time[u] = phase_times[u]['glide']
                 metrics.soar_time[u] = phase_times[u]['soar']
-                metrics.powered_time[u] = phase_times[u]['powered']
+                metrics.engine_time[u] = phase_times[u]['engine']
         except Exception as e:
             print(f"⚠️  Erreur calcul métriques temps: {e}")
         

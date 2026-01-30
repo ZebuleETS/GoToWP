@@ -157,6 +157,8 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
     UBz = params['Z_upper_bound']
     Tsim_current = params['current_simulation_time']
     t_step = params['time_step']
+    # Coefficient alpha pour augmenter la priorité d'un critère (>1)
+    alpha = params['alpha']
     # Sélectionner les steps en fonction du mode de vol actuel
     if FLT_track[Uidx]['flight_mode'][-1] == 'glide':
         h_step = params['bearing_step_glide']
@@ -620,8 +622,14 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
         if len(candidate_sol['X']) > 0:
             print(f"   Premier candidat: ({candidate_sol['X'][0]:.1f}, {candidate_sol['Y'][0]:.1f}, {candidate_sol['Z'][0]:.1f})")
     
-    DM = np.column_stack([C_safety, C_distance, C_energy, C_sink, C_obstacle])
-    #DM = np.column_stack([C_safety, C_energy, C_sink, C_obstacle])
+    # Matrice de décision avec pondération alpha pour prioriser certains critères
+    # alpha > 1 : augmente l'importance du critère pondéré
+    # Mode glide : alpha pondère C_sink (minimiser la descente)
+    # Mode engine : alpha pondère C_energy (minimiser la consommation)
+    if FLT_data[Uidx]['flight_mode'] == 'glide' :
+        DM = np.column_stack([C_safety, C_distance, C_energy, alpha*C_sink, C_obstacle])
+    elif FLT_data[Uidx]['flight_mode'] == 'engine' :
+        DM = np.column_stack([C_safety, C_distance, alpha*C_energy, C_sink, C_obstacle])
     ranked_indices = decision_making(DM)
     idx = ranked_indices[0]  # Meilleur candidat selon le classement
     

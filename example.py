@@ -38,6 +38,10 @@ params['bearing_step'] = 10
 params['speed_step'] = 10
 params['safe_distance'] = 30.0
 params['horizon_length'] = 100.0
+# Coefficient alpha (>1) pour augmenter la priorité d'un critère de décision
+# En mode glide : augmente la priorité de minimiser la descente (C_sink)
+# En mode engine : augmente la priorité de minimiser la consommation (C_energy)
+params['alpha'] = 1.5  # Valeur recommandée: entre 1.0 et 3.0
 
 # Définition des obstacles (polygones)
 obstacles = generate_random_obstacles(5, params)

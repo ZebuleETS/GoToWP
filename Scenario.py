@@ -41,7 +41,7 @@ class PerformanceMetrics:
     total_flight_time: Dict[int, float] = field(default_factory=dict)
     glide_time: Dict[int, float] = field(default_factory=dict)
     soar_time: Dict[int, float] = field(default_factory=dict)
-    powered_time: Dict[int, float] = field(default_factory=dict)
+    engine_time: Dict[int, float] = field(default_factory=dict)
     
     # Métriques thermiques (endurance)
     thermals_generated: int = 0
@@ -248,7 +248,7 @@ class PerformanceAnalyzer:
         for u in range(nUAVs):
             glide_time = 0
             soar_time = 0
-            powered_time = 0
+            engine_time = 0
             
             if len(FLT_track[u]['flight_mode']) > 1:
                 for i in range(1, len(FLT_track[u]['flight_mode'])):
@@ -259,13 +259,13 @@ class PerformanceAnalyzer:
                         glide_time += time_step
                     elif mode == 'soar':
                         soar_time += time_step
-                    elif mode == 'powered':
-                        powered_time += time_step
+                    elif mode == 'engine':
+                        engine_time += time_step
             
             phase_times[u] = {
                 'glide': glide_time,
                 'soar': soar_time,
-                'powered': powered_time,
+                'engine': engine_time,
                 'total': FLT_track[u]['flight_time'][-1] if len(FLT_track[u]['flight_time']) > 0 else 0
             }
         
@@ -401,14 +401,14 @@ class PerformanceAnalyzer:
                 total = metrics.total_flight_time.get(u, 0)
                 glide = metrics.glide_time.get(u, 0)
                 soar = metrics.soar_time.get(u, 0)
-                powered = metrics.powered_time.get(u, 0)
+                engine = metrics.engine_time.get(u, 0)
                 
                 print(f"UAV {u}:")
                 print(f"  Total: {total:.1f}s")
                 if total > 0:
                     print(f"  Glide: {glide:.1f}s ({glide/total*100:.1f}%)")
                     print(f"  Soar: {soar:.1f}s ({soar/total*100:.1f}%)")
-                    print(f"  Powered: {powered:.1f}s ({powered/total*100:.1f}%)")
+                    print(f"  Engine: {engine:.1f}s ({engine/total*100:.1f}%)")
         
         # Métriques thermiques
         if metrics.thermals_generated > 0:
@@ -460,7 +460,7 @@ class PerformanceAnalyzer:
             'total_flight_time': metrics.total_flight_time,
             'glide_time': metrics.glide_time,
             'soar_time': metrics.soar_time,
-            'powered_time': metrics.powered_time,
+            'engine_time': metrics.engine_time,
             'thermals_generated': metrics.thermals_generated,
             'thermals_detected': metrics.thermals_detected,
             'thermals_exploited': metrics.thermals_exploited,
