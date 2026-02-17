@@ -228,9 +228,16 @@ class LawnMowerTrajectory(TrajectoryGenerator):
     def __init__(self, params=None, UAV_data=None):
         super().__init__(params, UAV_data)
         
-    def generate_path(self, area_bounds, fov_radius, uav_id=0, num_uavs=1, altitude=None) -> Dict:
+    def generate_path(self, area_bounds, fov_radius, uav_id=0, num_uavs=1, 
+                      altitude=None, pattern='normal') -> Dict:
         """
-        Génère une trajectoire en tondeuse à gazon pour couvrir une zone
+        Génère une trajectoire en tondeuse à gazon pour couvrir une zone.
+        
+        Patterns disponibles pour optimiser la couverture multi-drone :
+          - 'normal'     : balayage gauche→droite, avancement bas→haut (axe Y)
+          - 'reverse'    : même tracé que normal mais parcouru en sens inverse (haut→bas)
+          - 'transposed' : balayage bas→haut, avancement gauche→droite (axe X)
+          - 'transposed_reverse' : même tracé transposé mais parcouru en sens inverse
         
         Args:
             area_bounds (dict): Limites de la zone {X_min, X_max, Y_min, Y_max}
@@ -238,6 +245,7 @@ class LawnMowerTrajectory(TrajectoryGenerator):
             uav_id (int): ID du drone (0, 1, 2, ...)
             num_uavs (int): Nombre total de drones
             altitude (float): Altitude de vol (optionnelle, sinon utilise params)
+            pattern (str): Type de balayage ('normal', 'reverse', 'transposed', 'transposed_reverse')
             
         Returns:
             dict: Points de trajectoire {X: [], Y: [], Z: []}
@@ -251,48 +259,69 @@ class LawnMowerTrajectory(TrajectoryGenerator):
         if altitude is None:
             altitude = 400
         
-        # Espacement entre les lignes est le diamêtre FOV
-        # Le drone suit la ligne donc rayon = FOV /2
+        # Espacement entre les lignes = diamètre FOV
         line_spacing = fov_radius
         
-        # Calculer le nombre de lignes nécessaires pour couvrir toute la zone
-        coverage_width = y_max - y_min
-        num_lines = int(np.ceil(coverage_width / line_spacing)) + 1
+        # Déterminer les axes de balayage selon le pattern
+        is_transposed = pattern in ('transposed', 'transposed_reverse')
+        is_reversed = pattern in ('reverse', 'transposed_reverse')
         
-        # Décalage initial pour séparer les drones
-        # Chaque drone commence à une position différente en Y
-        offset_per_uav = line_spacing / num_uavs
-        y_start_offset = uav_id * offset_per_uav
+        if is_transposed:
+            # Transposé : balayage le long de Y, avancement le long de X
+            sweep_min, sweep_max = y_min, y_max   # axe de balayage (lignes)
+            advance_min, advance_max = x_min, x_max  # axe d'avancement
+        else:
+            # Normal : balayage le long de X, avancement le long de Y
+            sweep_min, sweep_max = x_min, x_max   # axe de balayage (lignes)
+            advance_min, advance_max = y_min, y_max  # axe d'avancement
+        
+        # Calculer le nombre de lignes nécessaires
+        advance_width = advance_max - advance_min
+        num_lines = int(np.ceil(advance_width / line_spacing)) + 1
         
         # Générer les waypoints
         waypoints_x = []
         waypoints_y = []
         waypoints_z = []
         
-        # Chaque drone parcourt toutes les lignes mais commence à des positions différentes
         for line_idx in range(num_lines):
-            # Position Y de cette ligne
-            y_pos = y_min + y_start_offset + (line_idx * line_spacing)
+            # Position sur l'axe d'avancement
+            advance_pos = advance_min + (line_idx * line_spacing)
+            if advance_pos > advance_max:
+                advance_pos = advance_max
             
-            # Alterner la direction (gauche-droite, droite-gauche)
+            # Alterner la direction de balayage (aller-retour)
             if line_idx % 2 == 0:
-                # Ligne de gauche à droite
-                waypoints_x.append(x_min)
-                waypoints_y.append(y_pos)
+                sweep_start, sweep_end = sweep_min, sweep_max
+            else:
+                sweep_start, sweep_end = sweep_max, sweep_min
+            
+            if is_transposed:
+                # Transposé : X avance, Y balaye
+                # Point de début de ligne
+                waypoints_x.append(advance_pos)
+                waypoints_y.append(sweep_start)
                 waypoints_z.append(altitude)
-                
-                waypoints_x.append(x_max)
-                waypoints_y.append(y_pos)
+                # Point de fin de ligne
+                waypoints_x.append(advance_pos)
+                waypoints_y.append(sweep_end)
                 waypoints_z.append(altitude)
             else:
-                # Ligne de droite à gauche
-                waypoints_x.append(x_max)
-                waypoints_y.append(y_pos)
+                # Normal : Y avance, X balaye
+                # Point de début de ligne
+                waypoints_x.append(sweep_start)
+                waypoints_y.append(advance_pos)
                 waypoints_z.append(altitude)
-                
-                waypoints_x.append(x_min)
-                waypoints_y.append(y_pos)
+                # Point de fin de ligne
+                waypoints_x.append(sweep_end)
+                waypoints_y.append(advance_pos)
                 waypoints_z.append(altitude)
+        
+        # Inverser l'ordre complet si pattern reverse
+        if is_reversed:
+            waypoints_x = waypoints_x[::-1]
+            waypoints_y = waypoints_y[::-1]
+            waypoints_z = waypoints_z[::-1]
         
         return {
             'X': waypoints_x,
