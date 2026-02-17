@@ -30,6 +30,42 @@ def _resolve_thermal_obj(thermal_or_dict):
     return thermal_or_dict
 
 
+def _check_thermal_altitude_conflict(uav_id, thermal_id, uav_altitude, controller, FLT_track, nUAVs, min_alt_separation=80.0):
+    """
+    Vérifie si un drone peut entrer dans une thermique sans conflit d'altitude
+    avec les autres drones déjà présents.
+    
+    Plusieurs drones peuvent utiliser la même thermique s'ils sont
+    suffisamment espacés en altitude (>= min_alt_separation).
+    
+    Args:
+        uav_id: ID du drone candidat
+        thermal_id: ID de la thermique visée
+        uav_altitude: Altitude actuelle du drone candidat (m)
+        controller: MultiUAVController
+        FLT_track: Données de vol
+        nUAVs: Nombre total de drones
+        min_alt_separation: Séparation minimale en altitude (m), défaut 80m
+        
+    Returns:
+        bool: True s'il y a un conflit (trop proche en altitude), False sinon
+    """
+    for other_u in range(nUAVs):
+        if other_u == uav_id:
+            continue
+        bridge = controller.bridges[other_u]
+        # Seuls les drones en orbite dans cette même thermique posent problème
+        if not bridge.is_orbiting or bridge.orbit_thermal_id != thermal_id:
+            continue
+        # Récupérer l'altitude de l'autre drone
+        if FLT_track[other_u]['Z']:
+            other_alt = FLT_track[other_u]['Z'][-1]
+            alt_diff = abs(uav_altitude - other_alt)
+            if alt_diff < min_alt_separation:
+                return True  # Conflit : trop proche en altitude
+    return False  # Pas de conflit
+
+
 class PX4SITLBridge:
     """
     Pont entre votre simulation et PX4 SITL pour un seul UAV
@@ -112,6 +148,8 @@ class PX4SITLBridge:
         await self.drone.action.takeoff()
         
         target_alt = self.params['working_floor']
+        async for fixedwing_metrics in self.drone.telemetry.fixedwing_metrics():
+            print(f"[UAV {self.uav_id}] Fixedwing metrics: {fixedwing_metrics}")
         async for position in self.drone.telemetry.position():
             current_alt = position.relative_altitude_m
             print(f"[UAV {self.uav_id}] Altitude actuelle: {current_alt:.1f}m / {target_alt:.1f}m", end='\r')
@@ -281,9 +319,9 @@ class PX4SITLBridge:
     async def start_offboard_mode(self):
         """Démarrer le mode offboard avec contrôle en vitesse"""
         print(f"[UAV {self.uav_id}] Démarrage mode offboard ...")
-        await self.drone.offboard.set_position_ned(
-               PositionNedYaw(0.0, 0.0, 0.0, 0.0)
-            )
+        # Utiliser la dernière position connue comme setpoint initial
+        # (évite un saut brusque vers l'origine après une orbite)
+        await self.drone.offboard.set_position_ned(self.last_position_ned)
         
         try:
             await self.drone.offboard.start()
@@ -392,8 +430,12 @@ class PX4SITLBridge:
             )
             print(f"[UAV {self.uav_id}] ✓ Orbit/loiter démarré ({mode})")
         except Exception as e:
-            print(f"[UAV {self.uav_id}] ✗ Erreur do_orbit: {e}")
+            print(f"[UAV {self.uav_id}] ✗ Erreur do_orbit: {e} → Reprise offboard")
             self.is_orbiting = False
+            self.orbit_mode = None
+            self.orbit_thermal_id = None
+            # Relancer offboard puisqu'il a été arrêté avant do_orbit
+            await self.start_offboard_mode()
             return False
         
         # Démarrer la surveillance d'altitude
@@ -556,7 +598,7 @@ class PX4SITLBridge:
                 OrbitYawBehavior.HOLD_FRONT_TANGENT_TO_CIRCLE,
                 lat_center,
                 lon_center,
-                params['working_floor'] 
+                params['Z_upper_bound']
             )
             print(f"[UAV {self.uav_id}] ✓ Transition soaring réussie")
             return True
@@ -595,6 +637,25 @@ class PX4SITLBridge:
         self.orbit_center_enu = None
         self.orbit_radius = None
         self.orbit_altitude_history = []
+        
+        # Mettre à jour last_position_ned avec la position réelle actuelle
+        # pour éviter un saut brusque quand offboard reprend
+        try:
+            async for position in self.drone.telemetry.position():
+                lat0 = self.simulation_origin['lat']
+                lon0 = self.simulation_origin['lon']
+                h0 = self.simulation_origin['alt']
+                x_ecef, y_ecef, z_ecef = pm.geodetic2ecef(
+                    position.latitude_deg, position.longitude_deg,
+                    position.absolute_altitude_m
+                )
+                north, east, down = pm.ecef2ned(x_ecef, y_ecef, z_ecef, lat0, lon0, h0)
+                self.last_position_ned = PositionNedYaw(north, east, down, 0.0)
+                self.last_velocity_ned = VelocityNedYaw(0.0, 0.0, 0.0, 0.0)
+                print(f"[UAV {self.uav_id}] Position NED mise à jour: N={north:.1f}, E={east:.1f}, D={down:.1f}")
+                break
+        except Exception as e:
+            print(f"[UAV {self.uav_id}] Avertissement lecture position: {e}")
         
         # Mettre en hold avant de reprendre offboard
         try:
@@ -1230,6 +1291,7 @@ async def run_multi_uav_simulation():
             FLT_track[u]['soaring_start_time'] = None
             FLT_track[u]['seeking_thermal'] = False
             FLT_track[u]['seeking_thermal_id'] = None
+            FLT_track[u]['visited_thermals'] = set()  # Thermiques déjà visitées par cet UAV
 
         # Fonction pour générer et évaluer la trajectoire d'un UAV
         async def generate_trajectory_for_uav(u):
@@ -1402,6 +1464,9 @@ async def run_multi_uav_simulation():
                                 )
                             await controller.stop_thermal_orbit(u)
                             FLT_track[u]['in_evaluation'] = False
+                            # Marquer comme visitée pour ne pas retenter
+                            if thermal_id is not None:
+                                FLT_track[u]['visited_thermals'].add(thermal_id)
                             FLT_track[u]['current_thermal_id'] = None
                             FLT_track[u]['flight_mode'].append('glide')
                     else:
@@ -1454,6 +1519,9 @@ async def run_multi_uav_simulation():
                             current_pos, GOAL_WPs[u], params['obstacles'],
                             exit_thermal, current_wp_indices[u]
                         )
+                        # Marquer la thermique comme visitée pour éviter d'y revenir
+                        if thermal_id is not None:
+                            FLT_track[u]['visited_thermals'].add(thermal_id)
                         FLT_track[u]['current_thermal_id'] = None
                         
                         if alt_summary:
@@ -1469,44 +1537,61 @@ async def run_multi_uav_simulation():
                         'Z': FLT_track[u]['Z'][-1]
                     }
                     
+                    # Réinitialiser la liste des thermiques visitées si altitude < working_floor
+                    if current_pos['Z'] < params['working_floor'] and FLT_track[u]['visited_thermals']:
+                        print(f"↓ UAV {u}: Altitude sous working_floor ({current_pos['Z']:.0f}m) → Reset thermiques visitées")
+                        FLT_track[u]['visited_thermals'] = set()
+                    
                     detected_thermal_id = detect_thermal_at_position(
                         current_pos, active_thermals, current_time
                     )
                     
                     if detected_thermal_id is not None:
-                        thermal_info = thermal_map.detected_thermals.get(detected_thermal_id)
-                        
-                        if thermal_info and thermal_info.get('evaluated') and thermal_info.get('alt_gain', 0) > 0:
-                            thermal_obj = _resolve_thermal_obj(active_thermals[detected_thermal_id])
-                            FLT_track[u]['current_thermal_id'] = detected_thermal_id
-                            FLT_track[u]['flight_mode'].append('soaring')
-                            FLT_track[u]['soaring_start_time'] = current_time
-                            print(f"\n🔄 UAV {u}: Thermique {detected_thermal_id} connue viable → Orbite soaring MAVSDK")
-                            await controller.start_thermal_orbit(u, thermal_obj, current_pos['Z'], mode='soaring')
-                            continue
-                        
-                        elif not thermal_info:
-                            thermal_obj = _resolve_thermal_obj(active_thermals[detected_thermal_id])
-                            thermal_map.add_thermal_detection(detected_thermal_id, thermal_obj, current_time)
+                        # Ignorer les thermiques déjà visitées par cet UAV
+                        if detected_thermal_id in FLT_track[u]['visited_thermals']:
+                            pass  # Ne pas réentrer dans cette thermique
+                        else:
+                            thermal_info = thermal_map.detected_thermals.get(detected_thermal_id)
                             
-                            FLT_track[u]['in_evaluation'] = True
-                            FLT_track[u]['current_thermal_id'] = detected_thermal_id
-                            FLT_track[u]['evaluation_start_altitude'] = current_pos['Z']
+                            if thermal_info and thermal_info.get('evaluated') and thermal_info.get('alt_gain', 0) > 0:
+                                # Vérifier la séparation en altitude avec les autres drones dans cette thermique
+                                alt_conflict = _check_thermal_altitude_conflict(
+                                    u, detected_thermal_id, current_pos['Z'],
+                                    controller, FLT_track, nUAVs
+                                )
+                                if not alt_conflict:
+                                    thermal_obj = _resolve_thermal_obj(active_thermals[detected_thermal_id])
+                                    FLT_track[u]['current_thermal_id'] = detected_thermal_id
+                                    FLT_track[u]['flight_mode'].append('soaring')
+                                    FLT_track[u]['soaring_start_time'] = current_time
+                                    print(f"\n🔄 UAV {u}: Thermique {detected_thermal_id} connue viable → Orbite soaring MAVSDK")
+                                    await controller.start_thermal_orbit(u, thermal_obj, current_pos['Z'], mode='soaring')
+                                    continue
+                                else:
+                                    print(f"  UAV {u}: Thermique {detected_thermal_id} occupée à altitude similaire, passage")
                             
-                            evaluation_obstacle = {
-                                'X': thermal_obj.x, 'Y': thermal_obj.y,
-                                'radius': thermal_obj.radius,
-                                'type': 'evaluation_zone', 'uav_id': u
-                            }
-                            eval_poly = convert_cylindrical_obstacles_to_polygons([evaluation_obstacle])
-                            params['obstacles'].append({
-                                'vertices': eval_poly[0], 'uav_id': u,
-                                'thermal_id': detected_thermal_id, 'type': 'evaluation_zone'
-                            })
-                            
-                            print(f"\n🌀 UAV {u}: Nouvelle thermique {detected_thermal_id} détectée → Orbite d'évaluation MAVSDK")
-                            await controller.start_thermal_orbit(u, thermal_obj, current_pos['Z'], mode='evaluation')
-                            continue
+                            elif not thermal_info:
+                                thermal_obj = _resolve_thermal_obj(active_thermals[detected_thermal_id])
+                                thermal_map.add_thermal_detection(detected_thermal_id, thermal_obj, current_time)
+                                
+                                FLT_track[u]['in_evaluation'] = True
+                                FLT_track[u]['current_thermal_id'] = detected_thermal_id
+                                FLT_track[u]['evaluation_start_altitude'] = current_pos['Z']
+                                
+                                evaluation_obstacle = {
+                                    'X': thermal_obj.x, 'Y': thermal_obj.y,
+                                    'radius': thermal_obj.radius,
+                                    'type': 'evaluation_zone', 'uav_id': u
+                                }
+                                eval_poly = convert_cylindrical_obstacles_to_polygons([evaluation_obstacle])
+                                params['obstacles'].append({
+                                    'vertices': eval_poly[0], 'uav_id': u,
+                                    'thermal_id': detected_thermal_id, 'type': 'evaluation_zone'
+                                })
+                                
+                                print(f"\n🌀 UAV {u}: Nouvelle thermique {detected_thermal_id} détectée → Orbite d'évaluation MAVSDK")
+                                await controller.start_thermal_orbit(u, thermal_obj, current_pos['Z'], mode='evaluation')
+                                continue
                 
                 # --- SECOURS BASSE ALTITUDE (UAV libre, pas en orbite, pas en soaring) ---
                 if has_thermals and flight_mode != 'soaring':
@@ -1543,13 +1628,17 @@ async def run_multi_uav_simulation():
                             thermal = _resolve_thermal_obj(t_obj)
                             if not thermal.is_active(current_time):
                                 continue
+                            # Ignorer les thermiques déjà visitées (sauf si altitude < working_floor)
+                            if tid in FLT_track[u]['visited_thermals']:
+                                continue
                             dist = np.sqrt((current_x - thermal.x)**2 + (current_y - thermal.y)**2)
                             if dist < max_glide_range and dist < best_distance:
-                                occupied = any(
-                                    controller.bridges[ou].is_orbiting and controller.bridges[ou].orbit_thermal_id == tid
-                                    for ou in range(nUAVs) if ou != u
+                                # Vérifier séparation altitude avec drones déjà dans cette thermique
+                                alt_conflict = _check_thermal_altitude_conflict(
+                                    u, tid, current_alt,
+                                    controller, FLT_track, nUAVs
                                 )
-                                if not occupied:
+                                if not alt_conflict:
                                     best_thermal_id = tid
                                     best_distance = dist
                         

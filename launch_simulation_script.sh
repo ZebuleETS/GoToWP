@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Script de lancement Multi-UAV pour PX4 SITL + Gazebo
-# Usage: ./launch_multi_uav.sh [nombre_uavs]
+# Usage: ./launch_simulation_script.sh [nombre_uavs]
 
 set -e  # Arrêter en cas d'erreur
 
@@ -25,15 +25,19 @@ fi
 
 echo -e "${GREEN}Configuration: $NUM_UAVS UAVs${NC}"
 
-# Vérifier que PX4-Autopilot existe
+# Répertoires
 PX4_DIR="$HOME/PX4-Autopilot"
+MAVSDK_DIR="$HOME/MAVSDK"
+GOTOWP_DIR="$HOME/GoToWP"
+LOG_DIR="$GOTOWP_DIR/multi_uav_logs"
+
+# Vérifier que PX4-Autopilot existe
 if [ ! -d "$PX4_DIR" ]; then
     echo -e "${RED}❌ PX4-Autopilot non trouvé dans $PX4_DIR${NC}"
     echo "Clonez-le avec: git clone https://github.com/PX4/PX4-Autopilot.git --recursive"
     exit 1
 fi
 # Vérifier que MAVSDK existe
-MAVSDK_DIR="$HOME/MAVSDK"
 if [ ! -d "$MAVSDK_DIR" ]; then
     echo -e "${RED}❌ MAVSDK non trouvé dans $MAVSDK_DIR${NC}"
     echo "Clonez-le avec: git clone https://github.com/mavlink/MAVSDK.git"
@@ -42,6 +46,7 @@ fi
 
 # Nettoyer les processus précédents
 echo -e "${YELLOW}Nettoyage des processus existants...${NC}"
+pkill -9 -f mavsdk_server 2>/dev/null || true
 pkill -9 -f px4 2>/dev/null || true
 pkill -9 -f gazebo 2>/dev/null || true
 pkill -9 -f gzserver 2>/dev/null || true
@@ -49,7 +54,6 @@ pkill -9 -f gzclient 2>/dev/null || true
 sleep 3
 
 # Créer un répertoire pour les logs
-LOG_DIR="./multi_uav_logs"
 mkdir -p $LOG_DIR
 echo -e "${GREEN}Logs seront sauvegardés dans: $LOG_DIR${NC}"
 
@@ -67,13 +71,15 @@ cleanup() {
             kill $PID 2>/dev/null || true
         fi
     done
+    # Tuer tous les processus MAVSDK
     for PID in "${MAVSDK_PIDS[@]}"; do
         if [ ! -z "$PID" ]; then
             kill $PID 2>/dev/null || true
         fi
     done
     
-    # Tuer Gazebo
+    # Tuer Gazebo et mavsdk_server restants
+    pkill -9 -f mavsdk_server 2>/dev/null || true
     pkill -9 -f gazebo 2>/dev/null || true
     pkill -9 -f gzserver 2>/dev/null || true
     pkill -9 -f gzclient 2>/dev/null || true
@@ -85,66 +91,67 @@ cleanup() {
 # Capturer Ctrl+C
 trap cleanup SIGINT SIGTERM
 
-# Lancer le premier UAV avec Gazebo
+# ========== ÉTAPE 1 : Lancer TOUS les serveurs MAVSDK ==========
+echo -e "\n${BLUE}=========================================="
+echo "Lancement des serveurs MAVSDK"
+echo -e "==========================================${NC}"
+
+cd $MAVSDK_DIR
+
+for ((i=0; i<$NUM_UAVS; i++)); do
+    MAVLINK_UDP=$((14540 + i))
+    MAVSDK_PORT=$((50051 + i))
+    
+    ./build/src/mavsdk_server/src/mavsdk_server udpin://0.0.0.0:$MAVLINK_UDP -p $MAVSDK_PORT \
+        > $LOG_DIR/mavsdk_uav_${i}.log 2>&1 &
+    
+    MAVSDK_PIDS[$i]=$!
+    echo -e "${GREEN}✓ MAVSDK server UAV $i : UDP $MAVLINK_UDP → port $MAVSDK_PORT (PID: ${MAVSDK_PIDS[$i]})${NC}"
+done
+
+sleep 2
+
+# ========== ÉTAPE 2 : Lancer PX4 SITL ==========
 echo -e "\n${BLUE}=========================================="
 echo "Lancement du premier UAV avec Gazebo"
 echo -e "==========================================${NC}"
 
 cd $PX4_DIR
 
-# Lancer Gazebo avec le premier drone
-HEADLESS=1 make px4_sitl_default gz_rc_cessna > $LOG_DIR/gazebo.log 2>&1 &
-GAZEBO_PID=$!
-echo -e "${GREEN}✓ Gazebo lancé (PID: $GAZEBO_PID)${NC}"
-sleep 10
+# UAV 0 : Lancer Gazebo + premier drone
+HEADLESS=1 make px4_sitl_default gz_rc_cessna > $LOG_DIR/px4_uav_0.log 2>&1 &
+PX4_PIDS[0]=$!
+echo -e "${GREEN}✓ Gazebo + UAV 0 lancé (PID: ${PX4_PIDS[0]})${NC}"
+echo -e "${YELLOW}Attente de l'initialisation Gazebo (15s)...${NC}"
+sleep 15
 
-# Lancer les instances PX4 pour chaque UAV
-echo -e "\n${BLUE}=========================================="
-echo "Lancement des instances PX4"
-echo -e "==========================================${NC}"
+# UAVs 1+ : Instances PX4 standalone
+if [ $NUM_UAVS -gt 1 ]; then
+    echo -e "\n${BLUE}=========================================="
+    echo "Lancement des instances PX4 supplémentaires"
+    echo -e "==========================================${NC}"
+fi
+
+# Positions de spawn espacées pour éviter les collisions au sol
+# Alternance gauche/droite sur l'axe Y
+SPAWN_POSITIONS=("0,5,0.5" "0,-5,0.5" "5,0,0.5" "-5,0,0.5" "5,5,0.5" "-5,-5,0.5" "5,-5,0.5" "-5,5,0.5" "10,0,0.5" "0,10,0.5")
 
 for ((i=1; i<$NUM_UAVS; i++)); do
-    # Calculer les ports
-    MAVLINK_UDP=$((14540 + i))
-    MAVSDK_PORT=$((50051 + i))
     INSTANCE=$i
     
-    # Position de spawn
-    SPAWN_X=$(echo "scale=1; ($i % 3) * 2" | bc)
-    SPAWN_Y=$(echo "scale=1; ($i / 3) * 2" | bc)
-    SPAWN_Z=400
-    
     echo -e "\n${BLUE}--- UAV $i ---${NC}"
-    echo "Instance: $INSTANCE"
-    echo "MAVLink UDP: $MAVLINK_UDP"
-    echo "MAVSDK Port: $MAVSDK_PORT"
-    echo "Spawn position: ($SPAWN_X, $SPAWN_Y)"
-
-    cd $MAVSDK_DIR
-
-    # Lancer MAVSDK server pour cette instance
-    ./build/src/mavsdk_server/src/mavsdk_server udpin://0.0.0.0:$MAVLINK_UDP -p $MAVSDK_PORT \
-        > $LOG_DIR/mavsdk_uav_${i}.log 2>&1 &
+    echo "  Instance: $INSTANCE"
+    echo "  Spawn: ${SPAWN_POSITIONS[$i]}"
     
-    MAVSDK_PID=$!
-    MAVSDK_PIDS[$i]=$MAVSDK_PID
-    echo -e "${GREEN}✓ MAVSDK server lancé pour UAV $i (PID: $MAVSDK_PID)${NC}"
-
-    cd $PX4_DIR
-    
-    # Lancer PX4 pour cette instance
     PX4_GZ_STANDALONE=1 \
     PX4_SYS_AUTOSTART=4003 \
-    PX4_GZ_MODEL_POSE="$SPAWN_X, $SPAWN_Y" \
+    PX4_GZ_MODEL_POSE="${SPAWN_POSITIONS[$i]}" \
     PX4_SIM_MODEL=gz_rc_cessna \
-    ./build/px4_sitl_default/bin/px4 \
-        -i $INSTANCE && /bin/bash \
+    ./build/px4_sitl_default/bin/px4 -i $INSTANCE \
         > $LOG_DIR/px4_uav_${i}.log 2>&1 &
     
-    PID=$!
-    PX4_PIDS[$i]=$PID
-    
-    echo -e "${GREEN}✓ UAV $i lancé (PID: $PID)${NC}"
+    PX4_PIDS[$i]=$!
+    echo -e "${GREEN}✓ UAV $i lancé (PID: ${PX4_PIDS[$i]})${NC}"
     
     # Attendre entre chaque lancement
     sleep 5
@@ -154,21 +161,34 @@ done
 echo -e "\n${YELLOW}Attente de l'initialisation complète (10s)...${NC}"
 sleep 10
 
-# Vérifier que tous les processus tournent
+# ========== ÉTAPE 3 : Vérification ==========
 echo -e "\n${BLUE}Vérification des processus...${NC}"
 ALL_OK=true
+
+# Vérifier MAVSDK
+for i in "${!MAVSDK_PIDS[@]}"; do
+    PID=${MAVSDK_PIDS[$i]}
+    if ps -p $PID > /dev/null 2>&1; then
+        echo -e "${GREEN}✓ MAVSDK UAV $i (PID $PID) : OK${NC}"
+    else
+        echo -e "${RED}✗ MAVSDK UAV $i (PID $PID) : Arrêté${NC}"
+        ALL_OK=false
+    fi
+done
+
+# Vérifier PX4
 for i in "${!PX4_PIDS[@]}"; do
     PID=${PX4_PIDS[$i]}
-    if ps -p $PID > /dev/null; then
-        echo -e "${GREEN}✓ UAV $i (PID $PID) : En cours d'exécution${NC}"
+    if ps -p $PID > /dev/null 2>&1; then
+        echo -e "${GREEN}✓ PX4 UAV $i (PID $PID) : OK${NC}"
     else
-        echo -e "${RED}✗ UAV $i (PID $PID) : Arrêté${NC}"
+        echo -e "${RED}✗ PX4 UAV $i (PID $PID) : Arrêté${NC}"
         ALL_OK=false
     fi
 done
 
 if [ "$ALL_OK" = false ]; then
-    echo -e "${RED}Certains UAVs ne sont pas lancés correctement${NC}"
+    echo -e "${RED}Certains processus ne sont pas lancés correctement${NC}"
     echo "Vérifiez les logs dans $LOG_DIR"
     cleanup
     exit 1
@@ -179,31 +199,29 @@ echo "✓ Tous les UAVs sont prêts!"
 echo -e "==========================================${NC}"
 
 # Afficher les informations de connexion
-echo -e "\n${BLUE}Informations de connexion MAVLink:${NC}"
+echo -e "\n${BLUE}Informations de connexion:${NC}"
 for ((i=0; i<$NUM_UAVS; i++)); do
-    PORT=$((14540 + i))
-    echo "  UAV $i: udp://:$PORT"
+    UDP_PORT=$((14540 + i))
+    SDK_PORT=$((50051 + i))
+    echo "  UAV $i: MAVLink udp://:$UDP_PORT → MAVSDK port $SDK_PORT"
 done
 
 echo -e "\n${YELLOW}Pour QGroundControl, connectez sur udp://:14550${NC}"
 
-# Lancer la simulation Python
+# ========== ÉTAPE 4 : Lancer la simulation Python ==========
 echo -e "\n${BLUE}=========================================="
 echo "Lancement de la simulation Python"
 echo -e "==========================================${NC}"
 
-cd - > /dev/null
-
-# Attendre un peu avant de lancer Python
-sleep 5
+sleep 3
 
 echo -e "${GREEN}Prêt pour le décollage!${NC}"
 echo -e "${YELLOW}Appuyez sur Entrée pour lancer la simulation Python...${NC}"
 read
 
 # Lancer le script Python
-source /home/pix4/GoToWP/Mav/bin/activate
-python3 /home/pix4/GoToWP/dronePx4.py
+source $GOTOWP_DIR/Mav/bin/activate
+python3 $GOTOWP_DIR/dronePx4.py
 
 # Nettoyage final
 cleanup
