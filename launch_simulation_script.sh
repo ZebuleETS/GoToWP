@@ -78,8 +78,10 @@ cleanup() {
         fi
     done
     
-    # Tuer Gazebo et mavsdk_server restants
+    # Tuer Gazebo, px4 orphelins et mavsdk_server restants
     pkill -9 -f mavsdk_server 2>/dev/null || true
+    pkill -9 -f "bin/px4" 2>/dev/null || true
+    pkill -9 -f "gz sim" 2>/dev/null || true
     pkill -9 -f gazebo 2>/dev/null || true
     pkill -9 -f gzserver 2>/dev/null || true
     pkill -9 -f gzclient 2>/dev/null || true
@@ -111,57 +113,95 @@ done
 
 sleep 2
 
-# ========== ÉTAPE 2 : Lancer PX4 SITL ==========
+# ========== ÉTAPE 2 : Build PX4 ==========
 echo -e "\n${BLUE}=========================================="
-echo "Lancement du premier UAV avec Gazebo"
+echo "Build PX4 SITL"
 echo -e "==========================================${NC}"
 
 cd $PX4_DIR
 
-# UAV 0 : Lancer Gazebo + premier drone
-HEADLESS=1 make px4_sitl_default gz_rc_cessna > $LOG_DIR/px4_uav_0.log 2>&1 &
-PX4_PIDS[0]=$!
-echo -e "${GREEN}✓ Gazebo + UAV 0 lancé (PID: ${PX4_PIDS[0]})${NC}"
-echo -e "${YELLOW}Attente de l'initialisation Gazebo (15s)...${NC}"
-sleep 15
+# Build PX4 SITL (sans lancer de simulation)
+echo -e "${YELLOW}Build PX4 SITL en cours...${NC}"
+make px4_sitl_default > $LOG_DIR/px4_build.log 2>&1
+echo -e "${GREEN}✓ Build PX4 terminé${NC}"
 
-# UAVs 1+ : Instances PX4 standalone
-if [ $NUM_UAVS -gt 1 ]; then
-    echo -e "\n${BLUE}=========================================="
-    echo "Lancement des instances PX4 supplémentaires"
-    echo -e "==========================================${NC}"
-fi
+# ========== ÉTAPE 3 : Lancer toutes les instances PX4 ==========
+echo -e "\n${BLUE}=========================================="
+echo "Lancement de toutes les instances PX4"
+echo -e "==========================================${NC}"
 
-# Positions de spawn espacées pour éviter les collisions au sol
-# Alternance gauche/droite sur l'axe Y
-SPAWN_POSITIONS=("0,5,0.5" "0,-5,0.5" "5,0,0.5" "-5,0,0.5" "5,5,0.5" "-5,-5,0.5" "5,-5,0.5" "-5,5,0.5" "10,0,0.5" "0,10,0.5")
+# Positions de spawn espacées pour éviter les collisions
+SPAWN_POSITIONS=("0,0,0" "0,5,0" "0,-5,0" "5,0,0" "-5,0,0" "5,5,0" "-5,-5,0" "5,-5,0" "-5,5,0" "10,0,0")
 
-for ((i=1; i<$NUM_UAVS; i++)); do
+for ((i=0; i<$NUM_UAVS; i++)); do
     INSTANCE=$i
     
     echo -e "\n${BLUE}--- UAV $i ---${NC}"
     echo "  Instance: $INSTANCE"
     echo "  Spawn: ${SPAWN_POSITIONS[$i]}"
     
-    PX4_GZ_STANDALONE=1 \
-    PX4_SYS_AUTOSTART=4003 \
-    PX4_GZ_MODEL_POSE="${SPAWN_POSITIONS[$i]}" \
-    PX4_SIM_MODEL=gz_rc_cessna \
-    ./build/px4_sitl_default/bin/px4 -i $INSTANCE \
-        > $LOG_DIR/px4_uav_${i}.log 2>&1 &
-    
-    PX4_PIDS[$i]=$!
-    echo -e "${GREEN}✓ UAV $i lancé (PID: ${PX4_PIDS[$i]})${NC}"
-    
-    # Attendre entre chaque lancement
-    sleep 5
+    if [ $i -eq 0 ]; then
+        # Instance 0 : lance Gazebo automatiquement (pas de STANDALONE)
+        # PX4 détecte qu'aucun monde n'est lancé et démarre gz sim lui-même
+        HEADLESS=1 \
+        PX4_SYS_AUTOSTART=4003 \
+        PX4_GZ_WORLD=default \
+        PX4_GZ_MODEL_POSE="${SPAWN_POSITIONS[$i]}" \
+        PX4_SIM_MODEL=gz_rc_cessna \
+        ./build/px4_sitl_default/bin/px4 -i $INSTANCE \
+            > $LOG_DIR/px4_uav_${i}.log 2>&1 &
+        
+        PX4_PIDS[$i]=$!
+        echo -e "${GREEN}✓ UAV $i lancé + Gazebo (PID: ${PX4_PIDS[$i]})${NC}"
+        
+        # Attendre que Gazebo soit prêt avant de lancer les autres instances
+        echo -e "${YELLOW}Attente de Gazebo + UAV 0 (max 120s)...${NC}"
+        MAX_WAIT=120
+        ELAPSED=0
+        while [ $ELAPSED -lt $MAX_WAIT ]; do
+            if gz topic -l 2>/dev/null | grep -q "clock"; then
+                echo -e "${GREEN}✓ Gazebo prêt après ${ELAPSED}s${NC}"
+                break
+            fi
+            if ! kill -0 ${PX4_PIDS[0]} 2>/dev/null; then
+                echo -e "${RED}✗ PX4 UAV 0 a échoué. Vérifiez $LOG_DIR/px4_uav_0.log${NC}"
+                cleanup
+                exit 1
+            fi
+            sleep 3
+            ELAPSED=$((ELAPSED + 3))
+            echo -e "${YELLOW}  Attente Gazebo... (${ELAPSED}s)${NC}"
+        done
+        
+        if [ $ELAPSED -ge $MAX_WAIT ]; then
+            echo -e "${RED}✗ Timeout : Gazebo n'a pas démarré en ${MAX_WAIT}s${NC}"
+            cleanup
+            exit 1
+        fi
+        
+        sleep 5
+    else
+        # Instances 1+ : mode standalone, se connecte au Gazebo existant
+        PX4_GZ_STANDALONE=1 \
+        PX4_SYS_AUTOSTART=4003 \
+        PX4_GZ_MODEL_POSE="${SPAWN_POSITIONS[$i]}" \
+        PX4_SIM_MODEL=gz_rc_cessna \
+        ./build/px4_sitl_default/bin/px4 -i $INSTANCE \
+            > $LOG_DIR/px4_uav_${i}.log 2>&1 &
+        
+        PX4_PIDS[$i]=$!
+        echo -e "${GREEN}✓ UAV $i lancé en standalone (PID: ${PX4_PIDS[$i]})${NC}"
+        
+        # Attendre entre chaque lancement
+        sleep 5
+    fi
 done
 
 # Attendre que tous soient initialisés
-echo -e "\n${YELLOW}Attente de l'initialisation complète (10s)...${NC}"
-sleep 10
+echo -e "\n${YELLOW}Attente de l'initialisation complète (15s)...${NC}"
+sleep 15
 
-# ========== ÉTAPE 3 : Vérification ==========
+# ========== ÉTAPE 4 : Vérification ==========
 echo -e "\n${BLUE}Vérification des processus...${NC}"
 ALL_OK=true
 
@@ -182,7 +222,7 @@ for i in "${!PX4_PIDS[@]}"; do
     if ps -p $PID > /dev/null 2>&1; then
         echo -e "${GREEN}✓ PX4 UAV $i (PID $PID) : OK${NC}"
     else
-        echo -e "${RED}✗ PX4 UAV $i (PID $PID) : Arrêté${NC}"
+        echo -e "${RED}✗ PX4 UAV $i (PID $PID) : Arrêté (vérifier $LOG_DIR/px4_uav_${i}.log)${NC}"
         ALL_OK=false
     fi
 done
@@ -208,7 +248,7 @@ done
 
 echo -e "\n${YELLOW}Pour QGroundControl, connectez sur udp://:14550${NC}"
 
-# ========== ÉTAPE 4 : Lancer la simulation Python ==========
+# ========== ÉTAPE 5 : Lancer la simulation Python ==========
 echo -e "\n${BLUE}=========================================="
 echo "Lancement de la simulation Python"
 echo -e "==========================================${NC}"

@@ -123,6 +123,26 @@ class PX4SITLBridge:
                 print(f"[UAV {self.uav_id}] ✓ GPS obtenu!")
                 break
         
+        # Attendre que le drone soit armable (tous les pré-checks passés)
+        print(f"[UAV {self.uav_id}] Attente pré-checks armement...")
+        timeout_start = time.time()
+        async for health in self.drone.telemetry.health():
+            if health.is_armable:
+                print(f"[UAV {self.uav_id}] ✓ Drone armable!")
+                break
+            elapsed = time.time() - timeout_start
+            if elapsed > 120:
+                print(f"[UAV {self.uav_id}] ⚠️  Timeout armable après 120s - tentative quand même")
+                print(f"[UAV {self.uav_id}]   Health: accel_cal={health.is_accelerometer_calibration_ok}, "
+                      f"mag_cal={health.is_magnetometer_calibration_ok}, "
+                      f"gyro_cal={health.is_gyroscope_calibration_ok}, "
+                      f"local_pos={health.is_local_position_ok}, "
+                      f"global_pos={health.is_global_position_ok}, "
+                      f"home_pos={health.is_home_position_ok}")
+                break
+            if int(elapsed) % 10 == 0 and int(elapsed) > 0:
+                print(f"[UAV {self.uav_id}]   En attente... ({int(elapsed)}s) armable={health.is_armable}")
+        
         # Stocker la position home
         async for terrain_info in self.drone.telemetry.home():
             self.home_position = terrain_info
@@ -142,14 +162,31 @@ class PX4SITLBridge:
         await self.drone.action.hold()
         
         print(f"[UAV {self.uav_id}] Armement...")
-        await self.drone.action.arm()
+        max_retries = 10
+        for attempt in range(max_retries):
+            try:
+                await self.drone.action.arm()
+                print(f"[UAV {self.uav_id}] ✓ Armé!")
+                break
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    print(f"[UAV {self.uav_id}] Armement refusé (tentative {attempt+1}/{max_retries}): {e}")
+                    # Attendre que armable revienne True
+                    await asyncio.sleep(3)
+                    # Re-vérifier le health
+                    async for health in self.drone.telemetry.health():
+                        print(f"[UAV {self.uav_id}]   armable={health.is_armable}, "
+                              f"global_pos={health.is_global_position_ok}, "
+                              f"home_pos={health.is_home_position_ok}")
+                        break
+                else:
+                    print(f"[UAV {self.uav_id}] ✗ Échec armement après {max_retries} tentatives: {e}")
+                    raise
         
         print(f"[UAV {self.uav_id}] Décollage...")
         await self.drone.action.takeoff()
         
         target_alt = self.params['working_floor']
-        async for fixedwing_metrics in self.drone.telemetry.fixedwing_metrics():
-            print(f"[UAV {self.uav_id}] Fixedwing metrics: {fixedwing_metrics}")
         async for position in self.drone.telemetry.position():
             current_alt = position.relative_altitude_m
             print(f"[UAV {self.uav_id}] Altitude actuelle: {current_alt:.1f}m / {target_alt:.1f}m", end='\r')
