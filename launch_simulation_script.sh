@@ -51,6 +51,9 @@ pkill -9 -f px4 2>/dev/null || true
 pkill -9 -f gazebo 2>/dev/null || true
 pkill -9 -f gzserver 2>/dev/null || true
 pkill -9 -f gzclient 2>/dev/null || true
+
+# Supprimer les logs
+rm -rf $LOG_DIR
 sleep 3
 
 # Créer un répertoire pour les logs
@@ -62,7 +65,7 @@ declare -a PX4_PIDS
 declare -a MAVSDK_PIDS
 
 # Fonction de nettoyage
-cleanup() {
+cleanup () {
     echo -e "\n${YELLOW}Nettoyage en cours...${NC}"
     
     # Tuer tous les processus PX4
@@ -131,7 +134,7 @@ echo "Lancement de toutes les instances PX4"
 echo -e "==========================================${NC}"
 
 # Positions de spawn espacées pour éviter les collisions
-SPAWN_POSITIONS=("0,0,0" "0,5,0" "0,-5,0" "5,0,0" "-5,0,0" "5,5,0" "-5,-5,0" "5,-5,0" "-5,5,0" "10,0,0")
+SPAWN_POSITIONS=("0,0,0.5" "0,5,0.5" "0,-5,0.5" "5,0,0.5" "-5,0,0.5" "5,5,0.5" "-5,-5,0.5" "5,-5,0.5" "-5,5,0.5" "10,0,0.5")
 
 for ((i=0; i<$NUM_UAVS; i++)); do
     INSTANCE=$i
@@ -197,9 +200,9 @@ for ((i=0; i<$NUM_UAVS; i++)); do
     fi
 done
 
-# Attendre que tous soient initialisés
-echo -e "\n${YELLOW}Attente de l'initialisation complète (15s)...${NC}"
-sleep 15
+# Attendre que tous soient initialisés (EKF heading stabilisation)
+echo -e "\n${YELLOW}Attente de l'initialisation complète (5s)...${NC}"
+sleep 5
 
 # ========== ÉTAPE 4 : Vérification ==========
 echo -e "\n${BLUE}Vérification des processus...${NC}"

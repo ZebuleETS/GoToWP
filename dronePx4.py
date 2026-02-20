@@ -135,7 +135,7 @@ class PX4SITLBridge:
                 print(f"[UAV {self.uav_id}] ⚠️  Timeout armable après 120s - tentative quand même")
                 print(f"[UAV {self.uav_id}]   Health: accel_cal={health.is_accelerometer_calibration_ok}, "
                       f"mag_cal={health.is_magnetometer_calibration_ok}, "
-                      f"gyro_cal={health.is_gyroscope_calibration_ok}, "
+                      f"gyro_cal={health.is_gyrometer_calibration_ok}, "
                       f"local_pos={health.is_local_position_ok}, "
                       f"global_pos={health.is_global_position_ok}, "
                       f"home_pos={health.is_home_position_ok}")
