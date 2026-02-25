@@ -1,0 +1,6 @@
+[submodule "updated_PX4-Autopilot"]
+	path = updated_PX4-Autopilot
+	url = https://github.com/radhouenetrikii/updated_PX4-Autopilot.git
+[submodule "autosoaring"]
+	path = autosoaring
+	url = https://github.com/radhouenetrikii/autosoaring.git
