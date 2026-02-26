@@ -26,22 +26,27 @@ fi
 echo -e "${GREEN}Configuration: $NUM_UAVS UAVs${NC}"
 
 # Répertoires
-PX4_DIR="$HOME/PX4-Autopilot"
+PX4_DIR="$HOME/GoToWP/updated_PX4-Autopilot"
 MAVSDK_DIR="$HOME/MAVSDK"
 GOTOWP_DIR="$HOME/GoToWP"
-UPDATED_PX4_DIR="$GOTOWP_DIR/updated_PX4-Autopilot"
+XRCE_DDS_DIR="$HOME/Micro-XRCE-DDS-Agent"
 LOG_DIR="$GOTOWP_DIR/multi_uav_logs"
 
 # Configurer les chemins pour les plugins Gazebo custom
-export GZ_SIM_SYSTEM_PLUGIN_PATH="${UPDATED_PX4_DIR}/Tools/simulation/gz/GZ_Plugins/liftdrag_advanced/build:${UPDATED_PX4_DIR}/Tools/simulation/gz/GZ_Plugins/MulticopterMotorModel/build${GZ_SIM_SYSTEM_PLUGIN_PATH:+:$GZ_SIM_SYSTEM_PLUGIN_PATH}"
-export GZ_DESCRIPTOR_PATH="${UPDATED_PX4_DIR}/Tools/simulation/gz/GZ_Msgs/build${GZ_DESCRIPTOR_PATH:+:$GZ_DESCRIPTOR_PATH}"
+export GZ_SIM_SYSTEM_PLUGIN_PATH="${PX4_DIR}/Tools/simulation/gz/GZ_Plugins/liftdrag_advanced/build:${PX4_DIR}/Tools/simulation/gz/GZ_Plugins/MulticopterMotorModel/build${GZ_SIM_SYSTEM_PLUGIN_PATH:+:$GZ_SIM_SYSTEM_PLUGIN_PATH}"
+export GZ_DESCRIPTOR_PATH="${PX4_DIR}/Tools/simulation/gz/GZ_Msgs/build${GZ_DESCRIPTOR_PATH:+:$GZ_DESCRIPTOR_PATH}"
 
-# Vérifier que PX4-Autopilot existe
+# Vérifier que PX4-Autopilot (version mise à jour) existe
 if [ ! -d "$PX4_DIR" ]; then
     echo -e "${RED}❌ PX4-Autopilot non trouvé dans $PX4_DIR${NC}"
-    echo "Clonez-le avec: git clone https://github.com/PX4/PX4-Autopilot.git --recursive"
     exit 1
 fi
+if [ ! -f "$PX4_DIR/build/px4_sitl_default/bin/px4" ]; then
+    echo -e "${RED}❌ PX4 SITL non compilé. Compilez d'abord :${NC}"
+    echo "  cd $PX4_DIR && make px4_sitl_default"
+    exit 1
+fi
+echo -e "${GREEN}✓ PX4-Autopilot (updated) trouvé : $PX4_DIR${NC}"
 # Vérifier que MAVSDK existe
 if [ ! -d "$MAVSDK_DIR" ]; then
     echo -e "${RED}❌ MAVSDK non trouvé dans $MAVSDK_DIR${NC}"
@@ -49,9 +54,19 @@ if [ ! -d "$MAVSDK_DIR" ]; then
     exit 1
 fi
 
+# Vérifier que Micro XRCE-DDS Agent existe
+if [ ! -f "$XRCE_DDS_DIR/build/MicroXRCEAgent" ]; then
+    echo -e "${RED}❌ Micro XRCE-DDS Agent non trouvé dans $XRCE_DDS_DIR/build/${NC}"
+    echo "Compilez-le avec:"
+    echo "  cd $XRCE_DDS_DIR && mkdir -p build && cd build"
+    echo "  cmake .. && make -j\$(nproc)"
+    exit 1
+fi
+
 # Nettoyer les processus précédents
 echo -e "${YELLOW}Nettoyage des processus existants...${NC}"
 pkill -9 -f mavsdk_server 2>/dev/null || true
+pkill -9 -f MicroXRCEAgent 2>/dev/null || true
 pkill -9 -f px4 2>/dev/null || true
 pkill -9 -f gazebo 2>/dev/null || true
 pkill -9 -f gzserver 2>/dev/null || true
@@ -68,6 +83,7 @@ echo -e "${GREEN}Logs seront sauvegardés dans: $LOG_DIR${NC}"
 # Tableau pour stocker les PIDs
 declare -a PX4_PIDS
 declare -a MAVSDK_PIDS
+XRCE_DDS_PID=""
 
 # Fonction de nettoyage
 cleanup () {
@@ -85,9 +101,14 @@ cleanup () {
             kill $PID 2>/dev/null || true
         fi
     done
+    # Tuer le Micro XRCE-DDS Agent
+    if [ ! -z "$XRCE_DDS_PID" ]; then
+        kill $XRCE_DDS_PID 2>/dev/null || true
+    fi
     
     # Tuer Gazebo, px4 orphelins et mavsdk_server restants
     pkill -9 -f mavsdk_server 2>/dev/null || true
+    pkill -9 -f MicroXRCEAgent 2>/dev/null || true
     pkill -9 -f "bin/px4" 2>/dev/null || true
     pkill -9 -f "gz sim" 2>/dev/null || true
     pkill -9 -f gazebo 2>/dev/null || true
@@ -121,19 +142,37 @@ done
 
 sleep 2
 
-# ========== ÉTAPE 2 : Build PX4 ==========
+# ========== ÉTAPE 2 : Lancer le Micro XRCE-DDS Agent ==========
 echo -e "\n${BLUE}=========================================="
-echo "Build PX4 SITL"
+echo "Lancement du Micro XRCE-DDS Agent"
+echo -e "==========================================${NC}"
+
+XRCE_DDS_PORT=8888
+
+$XRCE_DDS_DIR/build/MicroXRCEAgent udp4 -p $XRCE_DDS_PORT \
+    > $LOG_DIR/xrce_dds_agent.log 2>&1 &
+
+XRCE_DDS_PID=$!
+echo -e "${GREEN}✓ Micro XRCE-DDS Agent : UDP port $XRCE_DDS_PORT (PID: $XRCE_DDS_PID)${NC}"
+
+sleep 1
+
+# ========== ÉTAPE 3 : Vérification Build PX4 ==========
+echo -e "\n${BLUE}=========================================="
+echo "Vérification PX4 SITL"
 echo -e "==========================================${NC}"
 
 cd $PX4_DIR
 
-# Build PX4 SITL (sans lancer de simulation)
-echo -e "${YELLOW}Build PX4 SITL en cours...${NC}"
-make px4_sitl_default > $LOG_DIR/px4_build.log 2>&1
-echo -e "${GREEN}✓ Build PX4 terminé${NC}"
+if [ -f "./build/px4_sitl_default/bin/px4" ]; then
+    echo -e "${GREEN}✓ Build PX4 SITL existant trouvé${NC}"
+else
+    echo -e "${YELLOW}Build PX4 SITL en cours...${NC}"
+    make px4_sitl_default > $LOG_DIR/px4_build.log 2>&1
+    echo -e "${GREEN}✓ Build PX4 terminé${NC}"
+fi
 
-# ========== ÉTAPE 3 : Lancer toutes les instances PX4 ==========
+# ========== ÉTAPE 4 : Lancer toutes les instances PX4 ==========
 echo -e "\n${BLUE}=========================================="
 echo "Lancement de toutes les instances PX4"
 echo -e "==========================================${NC}"
@@ -209,9 +248,17 @@ done
 echo -e "\n${YELLOW}Attente de l'initialisation complète (5s)...${NC}"
 sleep 5
 
-# ========== ÉTAPE 4 : Vérification ==========
+# ========== ÉTAPE 5 : Vérification ==========
 echo -e "\n${BLUE}Vérification des processus...${NC}"
 ALL_OK=true
+
+# Vérifier Micro XRCE-DDS Agent
+if ps -p $XRCE_DDS_PID > /dev/null 2>&1; then
+    echo -e "${GREEN}✓ Micro XRCE-DDS Agent (PID $XRCE_DDS_PID) : OK${NC}"
+else
+    echo -e "${RED}✗ Micro XRCE-DDS Agent (PID $XRCE_DDS_PID) : Arrêté (vérifier $LOG_DIR/xrce_dds_agent.log)${NC}"
+    ALL_OK=false
+fi
 
 # Vérifier MAVSDK
 for i in "${!MAVSDK_PIDS[@]}"; do
@@ -256,7 +303,7 @@ done
 
 echo -e "\n${YELLOW}Pour QGroundControl, connectez sur udp://:14550${NC}"
 
-# ========== ÉTAPE 5 : Lancer la simulation Python ==========
+# ========== ÉTAPE 6 : Lancer la simulation Python ==========
 echo -e "\n${BLUE}=========================================="
 echo "Lancement de la simulation Python"
 echo -e "==========================================${NC}"
