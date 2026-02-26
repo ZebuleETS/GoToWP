@@ -29,7 +29,12 @@ echo -e "${GREEN}Configuration: $NUM_UAVS UAVs${NC}"
 PX4_DIR="$HOME/PX4-Autopilot"
 MAVSDK_DIR="$HOME/MAVSDK"
 GOTOWP_DIR="$HOME/GoToWP"
+UPDATED_PX4_DIR="$GOTOWP_DIR/updated_PX4-Autopilot"
 LOG_DIR="$GOTOWP_DIR/multi_uav_logs"
+
+# Configurer les chemins pour les plugins Gazebo custom
+export GZ_SIM_SYSTEM_PLUGIN_PATH="${UPDATED_PX4_DIR}/Tools/simulation/gz/GZ_Plugins/liftdrag_advanced/build:${UPDATED_PX4_DIR}/Tools/simulation/gz/GZ_Plugins/MulticopterMotorModel/build${GZ_SIM_SYSTEM_PLUGIN_PATH:+:$GZ_SIM_SYSTEM_PLUGIN_PATH}"
+export GZ_DESCRIPTOR_PATH="${UPDATED_PX4_DIR}/Tools/simulation/gz/GZ_Msgs/build${GZ_DESCRIPTOR_PATH:+:$GZ_DESCRIPTOR_PATH}"
 
 # Vérifier que PX4-Autopilot existe
 if [ ! -d "$PX4_DIR" ]; then
@@ -147,10 +152,10 @@ for ((i=0; i<$NUM_UAVS; i++)); do
         # Instance 0 : lance Gazebo automatiquement (pas de STANDALONE)
         # PX4 détecte qu'aucun monde n'est lancé et démarre gz sim lui-même
         HEADLESS=1 \
-        PX4_SYS_AUTOSTART=4003 \
+        PX4_SYS_AUTOSTART=4008 \
         PX4_GZ_WORLD=default \
         PX4_GZ_MODEL_POSE="${SPAWN_POSITIONS[$i]}" \
-        PX4_SIM_MODEL=gz_rc_cessna \
+        PX4_SIM_MODEL=gz_advanced_plane \
         ./build/px4_sitl_default/bin/px4 -i $INSTANCE \
             > $LOG_DIR/px4_uav_${i}.log 2>&1 &
         
@@ -186,9 +191,9 @@ for ((i=0; i<$NUM_UAVS; i++)); do
     else
         # Instances 1+ : mode standalone, se connecte au Gazebo existant
         PX4_GZ_STANDALONE=1 \
-        PX4_SYS_AUTOSTART=4003 \
+        PX4_SYS_AUTOSTART=4008 \
         PX4_GZ_MODEL_POSE="${SPAWN_POSITIONS[$i]}" \
-        PX4_SIM_MODEL=gz_rc_cessna \
+        PX4_SIM_MODEL=gz_advanced_plane \
         ./build/px4_sitl_default/bin/px4 -i $INSTANCE \
             > $LOG_DIR/px4_uav_${i}.log 2>&1 &
         
