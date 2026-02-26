@@ -191,10 +191,10 @@ for ((i=0; i<$NUM_UAVS; i++)); do
         # Instance 0 : lance Gazebo automatiquement (pas de STANDALONE)
         # PX4 détecte qu'aucun monde n'est lancé et démarre gz sim lui-même
         HEADLESS=1 \
-        PX4_SYS_AUTOSTART=4008 \
+        PX4_SYS_AUTOSTART=4003 \
         PX4_GZ_WORLD=default \
         PX4_GZ_MODEL_POSE="${SPAWN_POSITIONS[$i]}" \
-        PX4_SIM_MODEL=gz_advanced_plane \
+        PX4_SIM_MODEL=gz_rc_cessna \
         ./build/px4_sitl_default/bin/px4 -i $INSTANCE \
             > $LOG_DIR/px4_uav_${i}.log 2>&1 &
         
@@ -230,9 +230,9 @@ for ((i=0; i<$NUM_UAVS; i++)); do
     else
         # Instances 1+ : mode standalone, se connecte au Gazebo existant
         PX4_GZ_STANDALONE=1 \
-        PX4_SYS_AUTOSTART=4008 \
+        PX4_SYS_AUTOSTART=4003 \
         PX4_GZ_MODEL_POSE="${SPAWN_POSITIONS[$i]}" \
-        PX4_SIM_MODEL=gz_advanced_plane \
+        PX4_SIM_MODEL=gz_rc_cessna \
         ./build/px4_sitl_default/bin/px4 -i $INSTANCE \
             > $LOG_DIR/px4_uav_${i}.log 2>&1 &
         
