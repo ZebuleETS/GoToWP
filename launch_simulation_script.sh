@@ -33,7 +33,7 @@ XRCE_DDS_DIR="$HOME/Micro-XRCE-DDS-Agent"
 LOG_DIR="$GOTOWP_DIR/multi_uav_logs"
 
 # Configurer les chemins pour les plugins Gazebo custom
-export GZ_SIM_SYSTEM_PLUGIN_PATH="${PX4_DIR}/Tools/simulation/gz/GZ_Plugins/liftdrag_advanced/build:${PX4_DIR}/Tools/simulation/gz/GZ_Plugins/MulticopterMotorModel/build${GZ_SIM_SYSTEM_PLUGIN_PATH:+:$GZ_SIM_SYSTEM_PLUGIN_PATH}"
+export GZ_SIM_SYSTEM_PLUGIN_PATH="${PX4_DIR}/Tools/simulation/gz/GZ_Plugins/liftdrag/build:${PX4_DIR}/Tools/simulation/gz/GZ_Plugins/liftdrag_advanced/build:${PX4_DIR}/Tools/simulation/gz/GZ_Plugins/MulticopterMotorModel/build${GZ_SIM_SYSTEM_PLUGIN_PATH:+:$GZ_SIM_SYSTEM_PLUGIN_PATH}"
 export GZ_DESCRIPTOR_PATH="${PX4_DIR}/Tools/simulation/gz/GZ_Msgs/build${GZ_DESCRIPTOR_PATH:+:$GZ_DESCRIPTOR_PATH}"
 
 # Vérifier que PX4-Autopilot (version mise à jour) existe
