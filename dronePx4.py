@@ -7,27 +7,71 @@ import asyncio
 import numpy as np
 from mavsdk import System
 from mavsdk.offboard import OffboardError, PositionNedYaw, VelocityNedYaw, AttitudeRate
-from mavsdk.telemetry import LandedState
+from mavsdk.telemetry import LandedState, FlightMode
 from mavsdk.action import OrbitYawBehavior
 import time
 import pymap3d as pm
 from GoToWP import gotoWaypointMulti
 from trajectory import TrajectoryEvaluator, generate_all_trajectories, generate_random_obstacles, LawnMowerTrajectory
-from thermal import ThermalGenerator, ThermalMap, ThermalEvaluator, detect_thermal_at_position
+from thermal import ThermalMap, detect_thermal_at_position
+from thermal_ros_bridge import ThermalROSBridge
 from compute import (convert_cylindrical_obstacles_to_polygons, find_nearest_waypoint, 
                      get_sink_rate, calculate_optimal_soaring_parameters)
 from Scenario import (TestScenario, PerformanceMetrics, SurveillanceObject, 
                       ScenarioGenerator, PerformanceAnalyzer, select_scenario)
 
 
-def _resolve_thermal_obj(thermal_or_dict):
+# ─── Constantes atmosphériques (ISA) ────────────────────────────────────
+_ACC_SEA_LEVEL    = 9.80665
+_MEAN_EARTH_RADIUS = 6371009
+_T_SEA_LEVEL      = 288.15
+_RHO_SEA_LEVEL    = 1.225
+_TROPO_LAPSE_RATE = -0.0065
+_R_AIR            = 287.058
+
+
+def _compute_atmosphere(working_floor: float) -> dict:
     """
-    Extrait l'objet Thermal depuis un dict ou retourne l'objet directement.
-    Gère le format {thermal_id: {'thermal': Thermal, ...}} et {thermal_id: Thermal}.
+    Calcule la gravité et la densité de l'air à l'altitude *working_floor*
+    selon le modèle ISA (International Standard Atmosphere).
+
+    Returns:
+        dict: {'grav': float, 'air_density': float}
     """
-    if isinstance(thermal_or_dict, dict) and 'thermal' in thermal_or_dict:
-        return thermal_or_dict['thermal']
-    return thermal_or_dict
+    grav = _ACC_SEA_LEVEL * (_MEAN_EARTH_RADIUS / (_MEAN_EARTH_RADIUS + working_floor))
+    T_fin = _T_SEA_LEVEL + _TROPO_LAPSE_RATE * working_floor
+    air_density = _RHO_SEA_LEVEL * (T_fin / _T_SEA_LEVEL) ** (
+        -grav / (_TROPO_LAPSE_RATE * _R_AIR) - 1
+    )
+    return {'grav': grav, 'air_density': air_density}
+
+
+def _remove_evaluation_obstacles(params, uav_id, thermal_id):
+    """Retire les obstacles de type evaluation_zone pour un UAV/thermique donné."""
+    params['obstacles'] = [
+        obs for obs in params['obstacles']
+        if not (obs.get('type') == 'evaluation_zone'
+                and obs.get('uav_id') == uav_id
+                and obs.get('thermal_id') == thermal_id)
+    ]
+
+
+def _cancel_seeking(FLT_track_u, GOAL_WPs_u, current_wp_indices, u):
+    """
+    Annule le seeking en cours pour un UAV :
+    retire le waypoint de secours inséré dans GOAL_WPs (s'il n'a pas encore été
+    atteint) et réinitialise les flags seeking dans FLT_track.
+    """
+    wp_idx = FLT_track_u.get('seeking_wp_idx')
+    if wp_idx is not None and wp_idx < len(GOAL_WPs_u['X']):
+        # Ne retirer le WP que si le drone ne l'a pas encore dépassé
+        if current_wp_indices[u] <= wp_idx:
+            GOAL_WPs_u['X'].pop(wp_idx)
+            GOAL_WPs_u['Y'].pop(wp_idx)
+            GOAL_WPs_u['Z'].pop(wp_idx)
+    FLT_track_u['seeking_thermal'] = False
+    FLT_track_u['seeking_thermal_id'] = None
+    FLT_track_u['seeking_wp_idx'] = None
 
 
 def _check_thermal_altitude_conflict(uav_id, thermal_id, uav_altitude, controller, FLT_track, nUAVs, min_alt_separation=80.0):
@@ -81,6 +125,7 @@ class PX4SITLBridge:
         self.is_connected = False
         self.home_position = None
         self.simulation_origin = None
+        self.own_home = None  # Home propre du drone (pour commandes NED PX4)
         
         # Taux de mise à jour (Hz)
         self.update_rate = 10
@@ -90,10 +135,18 @@ class PX4SITLBridge:
         self.last_position_ned = PositionNedYaw(0.0, 0.0, 0.0, 0.0)
         self.last_velocity_ned = VelocityNedYaw(0.0, 0.0, 0.0, 0.0)
         
+        # Surveillance du mode de vol PX4
+        self._px4_flight_mode = FlightMode.UNKNOWN
+        self._flight_mode_monitor_task = None
+        self._offboard_expected = False  # True quand on attend le mode offboard
+        self._rtl_expected = False       # True quand on attend le mode RTL
+        
         # État de l'orbite thermique (loiter)
         self.is_orbiting = False
         self.orbit_mode = None  # 'evaluation' ou 'soaring'
         self.orbit_thermal_id = None
+        self.orbit_thermal_obj = None  # Objet Thermal pour évaluation analytique
+        self.orbit_speed = None  # Vitesse tangentielle commandée
         self.orbit_center_enu = None  # Centre de l'orbite en ENU (x, y, z)
         self.orbit_radius = None
         self.orbit_start_altitude = None  # Altitude au début de l'orbite
@@ -149,12 +202,21 @@ class PX4SITLBridge:
             print(f"[UAV {self.uav_id}] ✓ Position home: {terrain_info.latitude_deg:.6f}, {terrain_info.longitude_deg:.6f}")
             break
         
-        # Définir l'origine de la simulation
+        # Définir l'origine de la simulation (sera potentiellement unifiée plus tard)
         self.simulation_origin = {
             'lat': self.home_position.latitude_deg,
             'lon': self.home_position.longitude_deg,
             'alt': self.home_position.absolute_altitude_m
         }
+        # Home propre du drone (toujours son véritable home pour les commandes NED PX4)
+        self.own_home = {
+            'lat': self.home_position.latitude_deg,
+            'lon': self.home_position.longitude_deg,
+            'alt': self.home_position.absolute_altitude_m
+        }
+        
+        # Démarrer la surveillance du mode de vol PX4 en arrière-plan
+        self._flight_mode_monitor_task = asyncio.create_task(self._monitor_flight_mode())
     
     async def arm_and_takeoff(self):
         """Armement et décollage"""
@@ -194,26 +256,154 @@ class PX4SITLBridge:
                 print(f"[UAV {self.uav_id}] ✓ Altitude atteinte: {current_alt:.1f}m")
                 break
     
+    async def _monitor_flight_mode(self):
+        """Souscription télémétrie en arrière-plan pour suivre le mode de vol PX4."""
+        try:
+            async for mode in self.drone.telemetry.flight_mode():
+                prev = self._px4_flight_mode
+                self._px4_flight_mode = mode
+                if prev != mode:
+                    print(f"[UAV {self.uav_id}] Mode PX4: {prev.name} → {mode.name}")
+                    # Détecter perte inattendue d'offboard
+                    if (self._offboard_expected
+                            and prev == FlightMode.OFFBOARD
+                            and mode in (FlightMode.HOLD, FlightMode.RETURN_TO_LAUNCH, FlightMode.POSCTL)):
+                        print(f"[UAV {self.uav_id}] ⚠️  Perte inattendue du mode offboard → {mode.name}")
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            print(f"[UAV {self.uav_id}] Erreur moniteur flight mode: {e}")
+
+    async def check_and_recover_offboard(self):
+        """
+        Vérifie si le drone devrait être en mode offboard mais ne l'est
+        plus (ex: failsafe HOLD/RTL suite à une glitch).
+        Si oui, tente de reprendre le mode offboard.
+        
+        Retourne True si recovery effectué, False sinon.
+        """
+        # Pas de recovery si on n'attend pas le mode offboard
+        if not self._offboard_expected:
+            return False
+        
+        # Pas de recovery si en orbite (PX4 est en mode orbit/hold, c'est normal)
+        if self.is_orbiting:
+            return False
+        
+        current_mode = self._px4_flight_mode
+        
+        # Modes qui indiquent une perte d'offboard
+        lost_modes = (FlightMode.HOLD, FlightMode.RETURN_TO_LAUNCH, FlightMode.POSCTL)
+        if current_mode not in lost_modes:
+            return False
+        
+        print(f"\n🚨 UAV {self.uav_id}: Mode PX4 = {current_mode.name} (attendu: OFFBOARD) → Tentative recovery")
+        
+        # Étape 1: Passer en hold pour stabiliser
+        try:
+            await self.drone.action.hold()
+            await asyncio.sleep(0.3)
+        except Exception as e:
+            print(f"[UAV {self.uav_id}] Avertissement hold pendant recovery: {e}")
+        
+        # Étape 2: Redémarrer offboard
+        success = await self.start_offboard_mode()
+        if success:
+            print(f"[UAV {self.uav_id}] ✅ Recovery offboard réussi")
+        else:
+            print(f"[UAV {self.uav_id}] ❌ Recovery offboard échoué — passage en hold")
+            try:
+                await self.drone.action.hold()
+            except:
+                pass
+        return success
+
+    async def check_and_recover_rtl(self):
+        """
+        Vérifie si le drone devrait être en mode RTL mais ne l'est
+        plus (ex: passage en HOLD au lieu de RTL suite à un glitch).
+        Si oui, tente de repasser en RTL.
+        
+        Même logique que check_and_recover_offboard, adaptée au RTL.
+        
+        Retourne True si recovery effectué, False sinon.
+        """
+        # Pas de recovery si on n'attend pas le mode RTL
+        if not self._rtl_expected:
+            return False
+        
+        current_mode = self._px4_flight_mode
+        
+        # Si déjà en RTL ou posé, pas de recovery nécessaire
+        if current_mode == FlightMode.RETURN_TO_LAUNCH:
+            return False
+        
+        # Le drone est posé (LAND ou les modes post-atterrissage)
+        if current_mode in (FlightMode.LAND,):
+            return False
+        
+        # Modes qui indiquent une perte de RTL
+        lost_modes = (FlightMode.HOLD, FlightMode.POSCTL, FlightMode.OFFBOARD,
+                      FlightMode.STABILIZED, FlightMode.ALTCTL)
+        if current_mode not in lost_modes:
+            return False
+        
+        print(f"\n🚨 UAV {self.uav_id}: Mode PX4 = {current_mode.name} (attendu: RTL) → Tentative recovery")
+        
+        # Étape 1: Passer en hold pour stabiliser
+        try:
+            await self.drone.action.hold()
+            await asyncio.sleep(0.3)
+        except Exception as e:
+            print(f"[UAV {self.uav_id}] Avertissement hold pendant recovery RTL: {e}")
+        
+        # Étape 2: Relancer RTL
+        try:
+            await self.drone.action.return_to_launch()
+            await asyncio.sleep(1.0)
+        except Exception as e:
+            print(f"[UAV {self.uav_id}] Erreur relance RTL: {e}")
+            return False
+        
+        # Vérifier le résultat
+        if self._px4_flight_mode == FlightMode.RETURN_TO_LAUNCH:
+            print(f"[UAV {self.uav_id}] ✅ Recovery RTL réussi")
+            return True
+        else:
+            print(f"[UAV {self.uav_id}] ❌ Recovery RTL échoué (mode: {self._px4_flight_mode.name})")
+            return False
+
     async def _offboard_keepalive_loop(self):
         """
         Boucle keepalive pour maintenir le mode offboard actif
-        Envoie des setpoints à 10Hz minimum
+        Envoie des setpoints à 10Hz minimum.
+        IMPORTANT: N'envoyer QUE set_position_velocity_ned.
+        Envoyer set_velocity_ned en plus fait basculer PX4 en mode
+        velocity-only, ce qui ignore la composante position et empêche
+        le drone de rejoindre sa cible.
         """
         print(f"[UAV {self.uav_id}] Démarrage keepalive offboard...")
+        consecutive_errors = 0
         try:
             while True:
-                await self.drone.offboard.set_position_velocity_ned(
-                    self.last_position_ned,
-                    self.last_velocity_ned
-                )
-                await self.drone.offboard.set_velocity_ned(
-                    self.last_velocity_ned
-                )
+                try:
+                    await self.drone.offboard.set_position_velocity_ned(
+                        self.last_position_ned,
+                        self.last_velocity_ned
+                    )
+                    consecutive_errors = 0
+                except asyncio.CancelledError:
+                    raise  # Propager pour sortir proprement
+                except Exception as e:
+                    consecutive_errors += 1
+                    if consecutive_errors <= 3:
+                        print(f"[UAV {self.uav_id}] ⚠️  Erreur keepalive (tentative {consecutive_errors}): {e}")
+                    if consecutive_errors > 50:  # ~2.5s d'échecs à 20Hz
+                        print(f"[UAV {self.uav_id}] ❌ Keepalive: trop d'erreurs consécutives ({consecutive_errors}), arrêt")
+                        break
                 await asyncio.sleep(0.05)  # 20Hz pour la sécurité (minimum requis: 2Hz)
         except asyncio.CancelledError:
             print(f"[UAV {self.uav_id}] Arrêt keepalive offboard")
-        except Exception as e:
-            print(f"[UAV {self.uav_id}] Erreur keepalive: {e}")
     
     def _validate_command_values(self, north, east, down, yaw, vn, ve, vd):
         """
@@ -277,7 +467,7 @@ class PX4SITLBridge:
             print(f"[UAV {self.uav_id}] ❌ Position simulation infinie: ({x_local}, {y_local}, {z_local})")
             return
         
-        # Origine de référence
+        # Origine de référence (partagée pour coordonnées ENU cohérentes)
         lat0 = self.simulation_origin['lat']
         lon0 = self.simulation_origin['lon']
         h0 = self.simulation_origin['alt']
@@ -292,10 +482,14 @@ class PX4SITLBridge:
         # Convertir en ECEF pour obtenir les coordonnées absolues
         x_ecef, y_ecef, z_ecef = pm.geodetic2ecef(lat_deg, lon_deg, alt_msl)
         
-        # Convertir ECEF en NED par rapport à l'origine
+        # Convertir ECEF en NED par rapport au HOME PROPRE du drone
+        # PX4 offboard NED est relatif au frame local du drone (son home)
+        home_lat = self.own_home['lat']
+        home_lon = self.own_home['lon']
+        home_alt = self.own_home['alt']
         north_ned, east_ned, down_ned = pm.ecef2ned(
             x_ecef, y_ecef, z_ecef,
-            lat0, lon0, h0
+            home_lat, home_lon, home_alt
         )
         
         # Orientation (bearing en radians)
@@ -306,9 +500,9 @@ class PX4SITLBridge:
             print(f"[UAV {self.uav_id}] ❌ Bearing invalide: {bearing_rad}")
             return
         
-        yaw_deg = np.degrees(bearing_rad)
-        # Normaliser le yaw dans [0, 360[
-        yaw_deg = yaw_deg % 360.0
+        # Convertir le bearing de la convention math (0=Est, CCW) vers
+        # la convention navigation PX4 (0=Nord, CW) : yaw_nav = 90° - yaw_math
+        yaw_deg = (90.0 - np.degrees(bearing_rad)) % 360.0
         
         # Vitesse aérodynamique
         airspeed = FLT_conditions['airspeed']
@@ -324,13 +518,24 @@ class PX4SITLBridge:
             return
         
         # Calculer les composantes de vitesse dans le référentiel local (ENU)
-        # Vitesse horizontale
-        v_horizontal = airspeed * np.cos(flight_path_angle)
+        # Vitesse verticale : utiliser le delta d'altitude réel entre les 2 dernières
+        # positions FLT_track au lieu de flight_path_angle (qui vaut 0.0 en glide,
+        # ce qui empêchait PX4 de descendre → drone restait à altitude constante).
+        if len(FLT_track['Z']) >= 2:
+            dz = FLT_track['Z'][-1] - FLT_track['Z'][-2]
+            time_step = self.params.get('time_step', 1.1)
+            velocity_up = dz / time_step  # m/s, négatif en descente
+        else:
+            velocity_up = airspeed * np.sin(flight_path_angle)
+        
+        # Vitesse horizontale (conserver la majorité d'airspeed pour l'horizontal)
+        v_horizontal_sq = max(airspeed**2 - velocity_up**2, 0.0)
+        v_horizontal = np.sqrt(v_horizontal_sq)
         
         # Composantes Est et Nord basées sur le bearing
-        velocity_east = v_horizontal * np.sin(bearing_rad)
-        velocity_north = v_horizontal * np.cos(bearing_rad)
-        velocity_up = airspeed * np.sin(flight_path_angle)
+        # Convention math de la simulation : 0=Est, X=Est=cos, Y=Nord=sin
+        velocity_east = v_horizontal * np.cos(bearing_rad)
+        velocity_north = v_horizontal * np.sin(bearing_rad)
         
         # Convertir les vitesses ENU en NED
         # NED: North, East, Down (Down est l'opposé de Up)
@@ -347,33 +552,86 @@ class PX4SITLBridge:
             return  # Ne pas mettre à jour avec des valeurs invalides
         
         # Stocker les dernières valeurs VALIDES pour le keepalive
-        self.last_position_ned = PositionNedYaw(north_ned, east_ned, down_ned, yaw_deg)
-        self.last_velocity_ned = VelocityNedYaw(velocity_north_ned, velocity_east_ned, velocity_down_ned, yaw_deg)
+        # Cast float() obligatoire : pymap3d/numpy retournent np.float64
+        # que gRPC/protobuf peut échouer à sérialiser → crash keepalive → RTL
+        self.last_position_ned = PositionNedYaw(
+            float(north_ned), float(east_ned), float(down_ned), float(yaw_deg)
+        )
+        self.last_velocity_ned = VelocityNedYaw(
+            float(velocity_north_ned), float(velocity_east_ned),
+            float(velocity_down_ned), float(yaw_deg)
+        )
         
         # La commande est maintenant envoyée par la boucle keepalive
         # pas besoin d'envoyer ici pour éviter les conflits
     
     async def start_offboard_mode(self):
-        """Démarrer le mode offboard avec contrôle en vitesse"""
+        """Démarrer le mode offboard avec contrôle en position+vitesse"""
         print(f"[UAV {self.uav_id}] Démarrage mode offboard ...")
-        # Utiliser la dernière position connue comme setpoint initial
-        # (évite un saut brusque vers l'origine après une orbite)
-        await self.drone.offboard.set_position_ned(self.last_position_ned)
+        
+        # Lire la position réelle actuelle du drone pour initialiser le setpoint
+        # Cela évite d'envoyer (0,0,0) qui commande une descente au sol et fait
+        # sortir PX4 du mode offboard par sécurité.
+        try:
+            async for position in self.drone.telemetry.position():
+                home_lat = self.own_home['lat']
+                home_lon = self.own_home['lon']
+                home_alt = self.own_home['alt']
+                x_ecef, y_ecef, z_ecef = pm.geodetic2ecef(
+                    position.latitude_deg, position.longitude_deg,
+                    position.absolute_altitude_m
+                )
+                north, east, down = pm.ecef2ned(
+                    x_ecef, y_ecef, z_ecef,
+                    home_lat, home_lon, home_alt
+                )
+                # Bearing initial: utiliser le yaw actuel si disponible
+                yaw_deg = 0.0
+                async for heading in self.drone.telemetry.heading():
+                    yaw_deg = heading.heading_deg
+                    break
+                self.last_position_ned = PositionNedYaw(
+                    float(north), float(east), float(down), float(yaw_deg)
+                )
+                self.last_velocity_ned = VelocityNedYaw(0.0, 0.0, 0.0, float(yaw_deg))
+                print(f"[UAV {self.uav_id}] Position initiale NED: N={north:.1f}, E={east:.1f}, D={down:.1f}")
+                break
+        except Exception as e:
+            print(f"[UAV {self.uav_id}] ⚠️  Impossible de lire la position actuelle: {e}")
+        
+        # Envoyer le setpoint initial avec position+vitesse
+        # (même type que le keepalive pour éviter un changement de mode PX4)
+        await self.drone.offboard.set_position_velocity_ned(
+            self.last_position_ned, self.last_velocity_ned
+        )
+        
+        # Démarrer la boucle keepalive AVANT offboard.start()
+        # PX4 exige un flux continu de setpoints pour rester en offboard.
+        # Si le keepalive démarre après, les autres tâches asyncio peuvent
+        # monopoliser l'event loop et PX4 sort d'offboard par timeout.
+        self.offboard_keepalive_task = asyncio.create_task(self._offboard_keepalive_loop())
+        await asyncio.sleep(0.5)  # Laisser ~10 setpoints passer avant le mode switch
         
         try:
             await self.drone.offboard.start()
-            print(f"[UAV {self.uav_id}] ✓ Mode offboard activé ")
-            
-            # Démarrer la boucle keepalive
-            self.offboard_keepalive_task = asyncio.create_task(self._offboard_keepalive_loop())
-            
+            self._offboard_expected = True
+            print(f"[UAV {self.uav_id}] ✓ Mode offboard activé")
             return True
         except OffboardError as error:
             print(f"[UAV {self.uav_id}] ✗ Erreur offboard: {error}")
+            # Annuler le keepalive si offboard a échoué
+            if self.offboard_keepalive_task:
+                self.offboard_keepalive_task.cancel()
+                try:
+                    await self.offboard_keepalive_task
+                except asyncio.CancelledError:
+                    pass
+                self.offboard_keepalive_task = None
             return False
     
     async def stop_offboard_mode(self):
         """Arrêter le mode offboard"""
+        self._offboard_expected = False
         # Arrêter la boucle keepalive
         if self.offboard_keepalive_task:
             self.offboard_keepalive_task.cancel()
@@ -389,16 +647,61 @@ class PX4SITLBridge:
             pass
     
     async def return_and_land(self):
-        """Retour et atterrissage"""
+        """Retour et atterrissage avec vérification RTL"""
         print(f"[UAV {self.uav_id}] Retour à la base...")
+        # Arrêter l'orbite et le moniteur d'altitude si en cours
+        if self.is_orbiting:
+            if self.altitude_monitor_task:
+                self.altitude_monitor_task.cancel()
+                try:
+                    await self.altitude_monitor_task
+                except asyncio.CancelledError:
+                    pass
+                self.altitude_monitor_task = None
+            self.is_orbiting = False
+            self.orbit_mode = None
         await self.stop_offboard_mode()
-        await self.drone.action.return_to_launch()
-        
+
+        # Activer le flag RTL attendu (utilisé par check_and_recover_rtl)
+        self._rtl_expected = True
+
+        # Commande RTL avec vérification du mode effectif
+        max_rtl_retries = 5
+        for attempt in range(1, max_rtl_retries + 1):
+            try:
+                await self.drone.action.return_to_launch()
+            except Exception as e:
+                print(f"[UAV {self.uav_id}] ⚠️  Erreur RTL (tentative {attempt}): {e}")
+
+            # Attendre un court instant puis vérifier le mode de vol
+            await asyncio.sleep(1.0)
+            current_mode = self._px4_flight_mode
+            if current_mode == FlightMode.RETURN_TO_LAUNCH:
+                print(f"[UAV {self.uav_id}] ✓ Mode RTL confirmé (tentative {attempt})")
+                break
+            else:
+                print(f"[UAV {self.uav_id}] ⚠️  Mode actuel: {current_mode.name} au lieu de RTL (tentative {attempt}/{max_rtl_retries})")
+                if attempt < max_rtl_retries:
+                    # Passer en HOLD avant de retenter RTL (même pattern que recover offboard)
+                    try:
+                        await self.drone.action.hold()
+                        await asyncio.sleep(0.5)
+                    except Exception:
+                        pass
+        else:
+            # Toutes les tentatives échouées
+            print(f"[UAV {self.uav_id}] ❌ Impossible de passer en RTL après {max_rtl_retries} tentatives (mode: {self._px4_flight_mode.name})")
+
         async for in_air in self.drone.telemetry.in_air():
             if not in_air:
                 print(f"[UAV {self.uav_id}] ✓ Atterri")
                 break
+            # Pendant l'attente atterrissage, vérifier périodiquement le mode RTL
+            await self.check_and_recover_rtl()
             await asyncio.sleep(1)
+        
+        # Désactiver le flag RTL
+        self._rtl_expected = False
 
     def _enu_to_geodetic(self, x_enu, y_enu, z_enu):
         """Convertir coordonnées ENU locales en lat/lon/alt géodésiques"""
@@ -409,7 +712,8 @@ class PX4SITLBridge:
         return lat_deg, lon_deg, alt_msl
 
     async def start_orbit_loiter(self, thermal_center_enu, radius_m, velocity_ms, 
-                                  altitude_enu, mode='evaluation', thermal_id=None):
+                                  altitude_enu, mode='evaluation', thermal_id=None,
+                                  thermal_obj=None):
         """
         Démarrer un loiter en cercle autour d'un thermique via MAVSDK do_orbit.
         Arrête le mode offboard et passe en mode orbit (hold/loiter).
@@ -421,6 +725,7 @@ class PX4SITLBridge:
             altitude_enu (float): Altitude de l'orbite en coordonnées ENU (Up)
             mode (str): 'evaluation' ou 'soaring'
             thermal_id: Identifiant du thermique
+            thermal_obj: Objet Thermal pour évaluation analytique
         """
         print(f"[UAV {self.uav_id}] Démarrage orbit/loiter ({mode}) autour du thermique {thermal_id}")
         print(f"  Centre ENU: ({thermal_center_enu['X']:.1f}, {thermal_center_enu['Y']:.1f})")
@@ -429,25 +734,40 @@ class PX4SITLBridge:
         # Arrêter le mode offboard avant de passer en orbit
         await self.stop_offboard_mode()
         
+        # Lire l'altitude réelle PX4 AVANT de convertir, pour l'utiliser comme altitude d'orbite
+        current_abs_altitude = None
+        async for position in self.drone.telemetry.position():
+            self.orbit_start_altitude = position.relative_altitude_m
+            current_abs_altitude = position.absolute_altitude_m
+            print(f"[UAV {self.uav_id}] Altitude de départ orbite: {self.orbit_start_altitude:.1f}m (abs: {current_abs_altitude:.1f}m)")
+            break
+        
         # Convertir le centre du thermique de ENU en coordonnées géodésiques
-        lat_center, lon_center, alt_center = self._enu_to_geodetic(
+        # On utilise altitude_enu juste pour le centre, mais l'altitude d'orbite sera l'altitude réelle
+        lat_center, lon_center, _alt_enu_converted = self._enu_to_geodetic(
             thermal_center_enu['X'], thermal_center_enu['Y'], altitude_enu
         )
+        
+        # Utiliser l'altitude absolue réelle du drone (pas l'altitude ENU de simulation)
+        # pour éviter que l'orbite force le drone à monter ou descendre
+        if current_abs_altitude is not None:
+            alt_center = current_abs_altitude
+        else:
+            alt_center = _alt_enu_converted
+            print(f"[UAV {self.uav_id}] ⚠️  Altitude réelle non disponible, utilisation altitude ENU convertie")
+        
+        print(f"[UAV {self.uav_id}] Altitude orbite AMSL: {alt_center:.1f}m")
         
         # Stocker l'état de l'orbite
         self.is_orbiting = True
         self.orbit_mode = mode
         self.orbit_thermal_id = thermal_id
+        self.orbit_thermal_obj = thermal_obj
+        self.orbit_speed = velocity_ms
         self.orbit_center_enu = {'X': thermal_center_enu['X'], 'Y': thermal_center_enu['Y'], 'Z': altitude_enu}
         self.orbit_radius = abs(radius_m)
         self.orbit_altitude_history = []
         self.orbit_start_time = time.time()
-        
-        # Lire l'altitude actuelle comme référence
-        async for position in self.drone.telemetry.position():
-            self.orbit_start_altitude = position.relative_altitude_m
-            print(f"[UAV {self.uav_id}] Altitude de départ orbite: {self.orbit_start_altitude:.1f}m")
-            break
         
         # Lancer l'orbite avec do_orbit
         # Yaw: face au centre pendant l'évaluation, tangentiel pendant le soaring
@@ -456,14 +776,22 @@ class PX4SITLBridge:
         else:
             yaw_behavior = OrbitYawBehavior.HOLD_FRONT_TANGENT_TO_CIRCLE
 
+        # Convertir tous les paramètres en float natif Python
+        # pymap3d retourne des np.float64 que gRPC/protobuf ne sérialise pas
+        radius_m_f = float(radius_m)
+        velocity_ms_f = float(velocity_ms)
+        lat_center_f = float(lat_center)
+        lon_center_f = float(lon_center)
+        alt_center_f = float(alt_center)
+
         try:
             await self.drone.action.do_orbit(
-                radius_m,          # Rayon (négatif = sens anti-horaire)
-                velocity_ms,       # Vitesse tangentielle
+                radius_m_f,        # Rayon (négatif = sens anti-horaire)
+                velocity_ms_f,     # Vitesse tangentielle
                 yaw_behavior,      # Comportement du yaw
-                lat_center,        # Latitude du centre
-                lon_center,        # Longitude du centre
-                alt_center         # Altitude absolue (AMSL)
+                lat_center_f,      # Latitude du centre
+                lon_center_f,      # Longitude du centre
+                alt_center_f       # Altitude absolue (AMSL)
             )
             print(f"[UAV {self.uav_id}] ✓ Orbit/loiter démarré ({mode})")
         except Exception as e:
@@ -472,7 +800,15 @@ class PX4SITLBridge:
             self.orbit_mode = None
             self.orbit_thermal_id = None
             # Relancer offboard puisqu'il a été arrêté avant do_orbit
-            await self.start_offboard_mode()
+            try:
+                await self.start_offboard_mode()
+            except Exception as e2:
+                print(f"[UAV {self.uav_id}] ✗ Échec reprise offboard après do_orbit: {e2}")
+                # Dernier recours : tenter hold
+                try:
+                    await self.drone.action.hold()
+                except Exception:
+                    pass
             return False
         
         # Démarrer la surveillance d'altitude
@@ -542,8 +878,12 @@ class PX4SITLBridge:
         altitudes = [h['altitude'] for h in self.orbit_altitude_history]
         times = [h['time'] for h in self.orbit_altitude_history]
         
-        total_change = altitudes[-1] - altitudes[0]
-        duration = times[-1] - times[0]
+        # Utiliser orbit_start_altitude comme référence (pas le premier échantillon)
+        # car le monitoring démarre avec un délai après le début effectif de l'orbite
+        ref_altitude = self.orbit_start_altitude if self.orbit_start_altitude is not None else altitudes[0]
+        total_change = altitudes[-1] - ref_altitude
+        # Durée totale depuis le début de l'orbite (times[i] = elapsed depuis orbit_start_time)
+        duration = times[-1] if times[-1] > 0 else (times[-1] - times[0])
         avg_climb_rate = total_change / duration if duration > 0 else 0.0
         
         return {
@@ -558,8 +898,11 @@ class PX4SITLBridge:
 
     async def evaluate_thermal_from_orbit(self, min_evaluation_time=15.0, min_climb_threshold=0.3):
         """
-        Évaluer si le thermique est exploitable en analysant la variation d'altitude
-        pendant l'orbite. Appelée périodiquement pendant le loiter d'évaluation.
+        Évaluer si le thermique est exploitable.
+        
+        IMPORTANT: PX4 do_orbit maintient une altitude fixe, donc les thermiques simulées
+        ne produisent aucun changement d'altitude mesurable via télémétrie.
+        L'évaluation utilise le modèle analytique du thermique (lift_rate vs sink_rate).
         
         Args:
             min_evaluation_time (float): Temps minimum d'évaluation en secondes
@@ -585,7 +928,55 @@ class PX4SITLBridge:
             return {'evaluation_complete': False, 'thermal_viable': False,
                     'altitude_gain': 0.0, 'climb_rate': 0.0, 'evaluation_time': elapsed}
         
-        # Analyser la variation d'altitude
+        # --- Évaluation analytique via le modèle de thermique ---
+        # PX4 do_orbit maintient l'altitude → impossible de mesurer le lift via télémétrie.
+        # On calcule le taux de montée net = portance_thermique - taux_de_chute_planeur.
+        if self.orbit_thermal_obj is not None and self.orbit_radius is not None:
+            orbit_radius = self.orbit_radius
+            thermal = self.orbit_thermal_obj
+            orbit_speed = self.orbit_speed or self.UAV_data.get('min_airspeed', 12.0)
+            
+            # Portance du thermique au rayon d'orbite
+            lift_rate = thermal.get_lift_rate(orbit_radius)
+            
+            # Conditions atmosphériques
+            working_floor = self.params.get('working_floor', 600.0)
+            atm = _compute_atmosphere(working_floor)
+            grav = atm['grav']
+            air_density = atm['air_density']
+            
+            # Angle d'inclinaison pour orbite circulaire: tan(bank) = v²/(g×r)
+            bank_angle = np.arctan2(orbit_speed**2, grav * orbit_radius)
+            
+            flight_conditions_orbit = {
+                'airspeed': orbit_speed,
+                'weight': 0.0,
+                'flight_path_angle': 0.0,
+                'grav_accel': grav,
+                'bank_angle': bank_angle,
+                'airspeed_dot': 0.0,
+                'air_density': air_density
+            }
+            sink_rate = abs(get_sink_rate(self.UAV_data, flight_conditions_orbit))
+            
+            net_climb_rate = lift_rate - sink_rate
+            estimated_alt_gain = net_climb_rate * elapsed
+            
+            print(f"[UAV {self.uav_id}] Évaluation thermique {self.orbit_thermal_id} (analytique):")
+            print(f"  Rayon orbite: {orbit_radius:.1f}m | Portance: {lift_rate:.2f}m/s | Chute: {sink_rate:.2f}m/s")
+            print(f"  Angle inclinaison: {np.degrees(bank_angle):.1f}° | Vitesse: {orbit_speed:.1f}m/s")
+            print(f"  Taux montée net: {net_climb_rate:+.2f}m/s | Gain estimé: {estimated_alt_gain:+.1f}m en {elapsed:.1f}s")
+            print(f"  Thermique {'VIABLE ✓' if net_climb_rate >= min_climb_threshold else 'NON VIABLE ✗'}")
+            
+            return {
+                'evaluation_complete': True,
+                'thermal_viable': net_climb_rate >= min_climb_threshold,
+                'altitude_gain': estimated_alt_gain,
+                'climb_rate': net_climb_rate,
+                'evaluation_time': elapsed
+            }
+        
+        # Fallback: si pas d'objet thermique, utiliser la télémétrie (ancien comportement)
         alt_var = self.get_altitude_variation()
         
         result = {
@@ -596,7 +987,7 @@ class PX4SITLBridge:
             'evaluation_time': elapsed
         }
         
-        print(f"[UAV {self.uav_id}] Évaluation thermique {self.orbit_thermal_id} terminée:")
+        print(f"[UAV {self.uav_id}] Évaluation thermique {self.orbit_thermal_id} (télémétrie):")
         print(f"  Gain d'altitude: {alt_var['total_change']:+.1f}m en {elapsed:.1f}s")
         print(f"  Taux de montée moyen: {alt_var['avg_climb_rate']:.2f}m/s")
         print(f"  Thermique {'VIABLE ✓' if result['thermal_viable'] else 'NON VIABLE ✗'}")
@@ -620,22 +1011,32 @@ class PX4SITLBridge:
         print(f"  Nouveau rayon: {optimal_radius:.1f}m, Vitesse: {optimal_speed:.1f}m/s")
         
         # Convertir le centre en géodésique
-        lat_center, lon_center, alt_center = self._enu_to_geodetic(
+        lat_center, lon_center, _alt_center = self._enu_to_geodetic(
             self.orbit_center_enu['X'], self.orbit_center_enu['Y'], self.orbit_center_enu['Z']
         )
+        
+        # Utiliser l'altitude réelle actuelle pour ne pas forcer un changement d'altitude
+        current_abs_altitude = _alt_center
+        try:
+            async for position in self.drone.telemetry.position():
+                current_abs_altitude = position.absolute_altitude_m
+                break
+        except Exception:
+            pass
         
         self.orbit_mode = 'soaring'
         self.orbit_radius = optimal_radius
         
         # Relancer l'orbite avec les paramètres optimaux
+        # Convertir en float natif Python pour gRPC/protobuf
         try:
             await self.drone.action.do_orbit(
-                -optimal_radius,     # Négatif = sens anti-horaire (standard thermique)
-                optimal_speed,
+                float(-optimal_radius),     # Négatif = sens anti-horaire (standard thermique)
+                float(optimal_speed),
                 OrbitYawBehavior.HOLD_FRONT_TANGENT_TO_CIRCLE,
-                lat_center,
-                lon_center,
-                params['Z_upper_bound']
+                float(lat_center),
+                float(lon_center),
+                float(current_abs_altitude)
             )
             print(f"[UAV {self.uav_id}] ✓ Transition soaring réussie")
             return True
@@ -671,6 +1072,8 @@ class PX4SITLBridge:
         self.is_orbiting = False
         self.orbit_mode = None
         self.orbit_thermal_id = None
+        self.orbit_thermal_obj = None
+        self.orbit_speed = None
         self.orbit_center_enu = None
         self.orbit_radius = None
         self.orbit_altitude_history = []
@@ -679,15 +1082,18 @@ class PX4SITLBridge:
         # pour éviter un saut brusque quand offboard reprend
         try:
             async for position in self.drone.telemetry.position():
-                lat0 = self.simulation_origin['lat']
-                lon0 = self.simulation_origin['lon']
-                h0 = self.simulation_origin['alt']
+                # NED doit être relatif au home propre du drone (pour PX4 offboard)
+                home_lat = self.own_home['lat']
+                home_lon = self.own_home['lon']
+                home_alt = self.own_home['alt']
                 x_ecef, y_ecef, z_ecef = pm.geodetic2ecef(
                     position.latitude_deg, position.longitude_deg,
                     position.absolute_altitude_m
                 )
-                north, east, down = pm.ecef2ned(x_ecef, y_ecef, z_ecef, lat0, lon0, h0)
-                self.last_position_ned = PositionNedYaw(north, east, down, 0.0)
+                north, east, down = pm.ecef2ned(x_ecef, y_ecef, z_ecef, home_lat, home_lon, home_alt)
+                self.last_position_ned = PositionNedYaw(
+                    float(north), float(east), float(down), 0.0
+                )
                 self.last_velocity_ned = VelocityNedYaw(0.0, 0.0, 0.0, 0.0)
                 print(f"[UAV {self.uav_id}] Position NED mise à jour: N={north:.1f}, E={east:.1f}, D={down:.1f}")
                 break
@@ -734,6 +1140,74 @@ class PX4SITLBridge:
             x_enu, y_enu, z_enu = pm.geodetic2enu(lat, lon, alt, lat0, lon0, h0)
             return {'X': x_enu, 'Y': y_enu, 'Z': z_enu}
 
+    async def get_current_telemetry(self):
+        """
+        Lire la position ET la vitesse actuelles du drone via MAVSDK.
+        Retourne position ENU + vitesse ENU (groundspeed et vertical).
+        
+        Returns:
+            dict: {
+                'X': float, 'Y': float, 'Z': float,      # position ENU (m)
+                'vn': float, 've': float, 'vd': float,    # vitesse NED (m/s)
+                'groundspeed': float,                       # vitesse horizontale (m/s)
+                'bearing': float,                           # cap basé sur vitesse (rad, nav convention)
+                'climb_rate': float                         # taux de montée (m/s, positif = montée)
+            } ou None en cas d'erreur
+        """
+        try:
+            # Lire position
+            pos_data = None
+            async for position in self.drone.telemetry.position():
+                lat = position.latitude_deg
+                lon = position.longitude_deg
+                alt = position.absolute_altitude_m
+                
+                lat0 = self.simulation_origin['lat']
+                lon0 = self.simulation_origin['lon']
+                h0 = self.simulation_origin['alt']
+                
+                x_enu, y_enu, z_enu = pm.geodetic2enu(lat, lon, alt, lat0, lon0, h0)
+                pos_data = {'X': x_enu, 'Y': y_enu, 'Z': z_enu}
+                break
+            
+            if pos_data is None:
+                return None
+            
+            # Lire vitesse NED
+            vel_data = {'vn': 0.0, 've': 0.0, 'vd': 0.0}
+            async for velocity in self.drone.telemetry.velocity_ned():
+                vel_data['vn'] = velocity.north_m_s
+                vel_data['ve'] = velocity.east_m_s
+                vel_data['vd'] = velocity.down_m_s
+                break
+            
+            # Calculer les métriques dérivées
+            vn = vel_data['vn']
+            ve = vel_data['ve']
+            vd = vel_data['vd']
+            groundspeed = np.sqrt(vn**2 + ve**2)
+            
+            # Bearing en convention math (0=Est, CCW) cohérent avec la simulation
+            # X=East, Y=North → atan2(North, East) = atan2(vn, ve)
+            if groundspeed > 0.5:  # Seuil minimum pour un bearing fiable
+                bearing = np.arctan2(vn, ve)
+            else:
+                bearing = None  # Pas de bearing fiable si quasi-stationnaire
+            
+            # Taux de montée (positif = montée, négatif = descente)
+            climb_rate = -vd  # NED: down positif = descente
+            
+            return {
+                **pos_data,
+                **vel_data,
+                'groundspeed': groundspeed,
+                'bearing': bearing,
+                'climb_rate': climb_rate
+            }
+        except Exception as e:
+            print(f"[UAV {self.uav_id}] ⚠️  Erreur lecture télémétrie: {e}")
+            return None
+
 
 class MultiUAVController:
     """
@@ -778,6 +1252,15 @@ class MultiUAVController:
             tasks.append(asyncio.create_task(self.bridges[u].connect()))
         await asyncio.gather(*tasks)
         
+        # Unifier l'origine de simulation : tous les bridges utilisent l'origine du bridge 0
+        # pour que les coordonnées ENU soient cohérentes dans toute la simulation
+        if self.bridges:
+            shared_origin = self.bridges[0].simulation_origin
+            for u in range(1, self.nUAVs):
+                self.bridges[u].simulation_origin = shared_origin
+                print(f"[UAV {u}] Origine unifiée → bridge 0: "
+                      f"({shared_origin['lat']:.6f}, {shared_origin['lon']:.6f}, {shared_origin['alt']:.1f})")
+        
         print("\n✓ Tous les UAVs sont connectés!")
     
     async def arm_and_takeoff_all(self):
@@ -795,29 +1278,143 @@ class MultiUAVController:
         print("\n✓ Tous les UAVs sont en l'air!")
     
     async def start_offboard_all(self):
-        """Démarrer le mode offboard pour tous les UAVs"""
-        print("\nDémarrage du mode offboard pour tous les UAVs...")
-        tasks = []
-        for u in range(self.nUAVs):
-            tasks.append(asyncio.create_task(self.bridges[u].start_offboard_mode()))
-        results = await asyncio.gather(*tasks)
+        """Démarrer le mode offboard pour tous les UAVs séquentiellement.
         
-        success_count = sum(results)
+        Le démarrage séquentiel est nécessaire car:
+        1. Chaque drone doit avoir son keepalive stable AVANT le mode switch
+        2. En parallèle, les lectures télémétrie gRPC monopolisent l'event loop
+           et affament les keepalive des drones déjà démarrés → timeout PX4
+        3. Un délai entre chaque drone laisse le keepalive s'établir
+        """
+        print("\nDémarrage du mode offboard pour tous les UAVs (séquentiel)...")
+        success_count = 0
+        for u in range(self.nUAVs):
+            result = await self.bridges[u].start_offboard_mode()
+            if result:
+                success_count += 1
+            else:
+                print(f"⚠️  UAV {u}: échec offboard, tentative de retry...")
+                await asyncio.sleep(1.0)
+                result = await self.bridges[u].start_offboard_mode()
+                if result:
+                    success_count += 1
+            # Délai entre chaque drone pour laisser les keepalive se stabiliser
+            await asyncio.sleep(0.5)
+        
         if success_count == self.nUAVs:
             print(f"✓ Mode offboard activé pour tous les {self.nUAVs} UAVs")
             return True
         else:
             print(f"⚠️  Mode offboard activé pour {success_count}/{self.nUAVs} UAVs")
             return False
+
+    async def recover_offboard_all(self, FLT_track):
+        """Vérifier et récupérer le mode offboard pour tous les UAVs qui l'ont perdu.
+        
+        Les drones en orbite, en évaluation ou en soaring sont exclus
+        (leur mode PX4 n'est pas offboard et c'est normal).
+        """
+        for u in range(self.nUAVs):
+            if u >= len(self.bridges):
+                continue
+            bridge = self.bridges[u]
+            # Exclure les drones en orbite (mode PX4 = orbit/hold, normal)
+            if bridge.is_orbiting:
+                continue
+            # Exclure les drones en évaluation
+            if FLT_track[u].get('in_evaluation', False):
+                continue
+            flight_mode = FLT_track[u]['flight_mode'][-1] if FLT_track[u]['flight_mode'] else 'glide'
+            if flight_mode == 'soaring':
+                continue
+            # Tenter le recovery (la méthode vérifie si c'est nécessaire)
+            await bridge.check_and_recover_offboard()
     
+    async def sync_all_positions_from_mavsdk(self, FLT_track, FLT_conditions):
+        """
+        Synchroniser position MAVSDK, vitesse (airspeed) et cap réels de
+        tous les UAVs vers FLT_track et FLT_conditions.
+        
+        Appelée AVANT gotoWaypointMulti pour que l'algorithme de décision
+        travaille avec la position réelle du drone, pas la position calculée.
+        
+        Synchronise :
+        - Position ENU (FLT_track X, Y, Z)
+        - Bearing basé sur la vitesse réelle (FLT_track bearing)
+        - Airspeed / groundspeed réel (FLT_conditions airspeed)
+        
+        Pour les drones en orbite, ne pas modifier (sync_orbit_position_to_simulation s'en charge).
+        """
+        async def _sync_one_uav(u):
+            bridge = self.bridges[u]
+            # Les drones en orbite sont gérés séparément par sync_orbit_position_to_simulation
+            if bridge.is_orbiting:
+                return
+            # Les drones en évaluation sont aussi en orbite
+            if FLT_track[u].get('in_evaluation', False):
+                return
+            # Besoin d'au moins un point dans FLT_track pour écraser
+            if not FLT_track[u]['X']:
+                return
+            
+            try:
+                telemetry = await bridge.get_current_telemetry()
+                if telemetry is None:
+                    return
+                
+                # Valider les coordonnées
+                if any(np.isnan(v) or np.isinf(v) for v in [telemetry['X'], telemetry['Y'], telemetry['Z']]):
+                    return
+                
+                # Écraser la dernière position dans FLT_track avec la position réelle
+                FLT_track[u]['X'][-1] = telemetry['X']
+                FLT_track[u]['Y'][-1] = telemetry['Y']
+                FLT_track[u]['Z'][-1] = telemetry['Z']
+                
+                # Bearing basé sur la direction de vol PX4 (plus fiable que le delta de position)
+                if telemetry['bearing'] is not None:
+                    FLT_track[u]['bearing'][-1] = telemetry['bearing']
+                elif len(FLT_track[u]['X']) >= 2:
+                    # Fallback : delta de position si vitesse trop faible
+                    # Convention math : atan2(dY, dX) = atan2(dNorth, dEast)
+                    dx = FLT_track[u]['X'][-1] - FLT_track[u]['X'][-2]  # delta East
+                    dy = FLT_track[u]['Y'][-1] - FLT_track[u]['Y'][-2]  # delta North
+                    if abs(dx) > 0.1 or abs(dy) > 0.1:
+                        FLT_track[u]['bearing'][-1] = np.arctan2(dy, dx)
+                
+                # Synchroniser la vitesse réelle vers FLT_conditions
+                # pour que gotoWaypoint utilise l'airspeed réelle de PX4
+                groundspeed = telemetry['groundspeed']
+                min_v = bridge.UAV_data.get('min_airspeed', 8.0)
+                max_v = bridge.UAV_data.get('max_airspeed', 30.0)
+                if groundspeed > 0.5:  # Seuil minimum de fiabilité
+                    # Borner dans la plage admissible de l'UAV
+                    clamped_speed = np.clip(groundspeed, min_v, max_v)
+                    FLT_conditions[u]['airspeed'] = clamped_speed
+                
+            except Exception as e:
+                print(f"[UAV {u}] ⚠️  Sync MAVSDK→simulation échouée: {e}")
+        
+        tasks = []
+        for u in range(self.nUAVs):
+            if u < len(self.bridges):
+                tasks.append(asyncio.create_task(_sync_one_uav(u)))
+        
+        if tasks:
+            await asyncio.gather(*tasks)
+
     async def update_all_from_simulation(self, FLT_track, FLT_conditions):
         """Mettre à jour tous les UAVs avec l'état de simulation
-        Les UAVs en orbite (loiter) sont exclus car PX4 gère leur position"""
+        Les UAVs en orbite (loiter) ou en évaluation sont exclus car PX4 gère leur position"""
         update_tasks = []
         for u in range(self.nUAVs):
             if u < len(self.bridges):
                 # Ne pas envoyer de commandes offboard aux UAVs en orbite
                 if self.bridges[u].is_orbiting:
+                    continue
+                # Ne pas envoyer de commandes offboard aux UAVs en évaluation
+                # (cohérent avec sync_all_positions_from_mavsdk qui les exclut aussi)
+                if FLT_track[u].get('in_evaluation', False):
                     continue
                 update_tasks.append(
                     asyncio.create_task(self.bridges[u].update_from_simulation_state(FLT_track[u], FLT_conditions[u]))
@@ -826,8 +1423,18 @@ class MultiUAVController:
         if update_tasks:
             await asyncio.gather(*update_tasks)
     
+    async def recover_rtl_all(self):
+        """Vérifier et récupérer le mode RTL pour tous les UAVs qui l'ont perdu.
+        
+        Même logique que recover_offboard_all, adaptée au RTL.
+        """
+        for u in range(self.nUAVs):
+            if u >= len(self.bridges):
+                continue
+            await self.bridges[u].check_and_recover_rtl()
+
     async def land_all(self):
-        """Atterrir tous les UAVs"""
+        """Atterrir tous les UAVs avec vérification RTL"""
         print("\n" + "="*70)
         print("ATTERRISSAGE DE TOUS LES UAVs")
         print("="*70)
@@ -835,6 +1442,55 @@ class MultiUAVController:
         for u in range(self.nUAVs):
             tasks.append(asyncio.create_task(self.bridges[u].return_and_land()))
         await asyncio.gather(*tasks)
+        
+        # Vérification finale : s'assurer que tous les UAVs ont bien atterri
+        # Utilise la même logique que recover_offboard_all : vérification par bridge
+        print("\nVérification finale du statut de tous les UAVs...")
+        all_landed = True
+        for u in range(self.nUAVs):
+            bridge = self.bridges[u]
+            mode = bridge._px4_flight_mode
+            try:
+                async for in_air in bridge.drone.telemetry.in_air():
+                    if in_air:
+                        all_landed = False
+                        print(f"[UAV {u}] ⚠️  Toujours en l'air (mode: {mode.name}) → Tentative recovery RTL")
+                        # Utiliser check_and_recover_rtl (même pattern que offboard)
+                        bridge._rtl_expected = True
+                        recovered = await bridge.check_and_recover_rtl()
+                        if not recovered:
+                            # Fallback: forcer RTL directement
+                            print(f"[UAV {u}] ⚠️  Recovery échoué, RTL direct...")
+                            try:
+                                await bridge.drone.action.hold()
+                                await asyncio.sleep(0.3)
+                                await bridge.drone.action.return_to_launch()
+                            except Exception as e:
+                                print(f"[UAV {u}] ❌ Échec RTL direct: {e}")
+                    else:
+                        print(f"[UAV {u}] ✓ Au sol")
+                    break
+            except Exception as e:
+                print(f"[UAV {u}] ⚠️  Impossible de vérifier le statut: {e}")
+        
+        if not all_landed:
+            print("\n⏳ Attente atterrissage des UAVs restants...")
+            for u in range(self.nUAVs):
+                bridge = self.bridges[u]
+                try:
+                    async for in_air in bridge.drone.telemetry.in_air():
+                        if not in_air:
+                            print(f"[UAV {u}] ✓ Atterri (vérification finale)")
+                            break
+                        # Vérifier périodiquement le mode RTL pendant l'attente
+                        await bridge.check_and_recover_rtl()
+                        await asyncio.sleep(1)
+                except Exception:
+                    pass
+        
+        # Désactiver tous les flags RTL
+        for u in range(self.nUAVs):
+            self.bridges[u]._rtl_expected = False
         
         print("\n✓ Tous les UAVs ont atterri!")
         
@@ -872,16 +1528,23 @@ class MultiUAVController:
         thermal_center = {'X': thermal.x, 'Y': thermal.y}
         
         if mode == 'evaluation':
-            # Rayon d'évaluation: 80% du rayon du thermique
-            orbit_radius = thermal.radius * 0.8
+            # Rayon d'évaluation: 35% du rayon du thermique pour rester dans la zone
+            # de forte portance (profil gaussien: à 35% → ~78% de la force max)
+            # Minimum 30m pour que le drone puisse physiquement orbiter
+            orbit_radius = max(30.0, thermal.radius * 0.35)
             # Vitesse d'évaluation: vitesse min pour rester stable
             orbit_speed = max(self.UAV_data['min_airspeed'], 12.0)
         else:
             # Pour le soaring, utiliser les paramètres optimaux
+            atm = _compute_atmosphere(self.params.get('working_floor', 600.0))
             flight_conditions = {
                 'airspeed': self.UAV_data['min_airspeed'],
                 'bank_angle': 0.0,
-                'flight_path_angle': 0.0
+                'flight_path_angle': 0.0,
+                'weight': 0.0,
+                'grav_accel': atm['grav'],
+                'air_density': atm['air_density'],
+                'airspeed_dot': 0.0
             }
             soaring_params = calculate_optimal_soaring_parameters(
                 self.UAV_data, thermal, flight_conditions
@@ -892,7 +1555,8 @@ class MultiUAVController:
         # Sens anti-horaire (négatif) pour les thermiques
         return await bridge.start_orbit_loiter(
             thermal_center, -orbit_radius, orbit_speed, 
-            altitude, mode, thermal_id=getattr(thermal, 'id', None)
+            altitude, mode, thermal_id=getattr(thermal, 'id', None),
+            thermal_obj=thermal
         )
     
     async def evaluate_thermal_orbit(self, uav_id):
@@ -926,10 +1590,17 @@ class MultiUAVController:
         
         bridge = self.bridges[uav_id]
         
+        # Conditions atmosphériques
+        atm = _compute_atmosphere(self.params.get('working_floor', 600.0))
+        
         flight_conditions = {
-            'airspeed': bridge.last_velocity_ned.north_m_s if hasattr(bridge.last_velocity_ned, 'north_m_s') else 13.0,
+            'airspeed': self.UAV_data.get('min_airspeed', 12.0),
             'bank_angle': 0.0,
-            'flight_path_angle': 0.0
+            'flight_path_angle': 0.0,
+            'weight': 0.0,
+            'grav_accel': atm['grav'],
+            'air_density': atm['air_density'],
+            'airspeed_dot': 0.0
         }
         soaring_params = calculate_optimal_soaring_parameters(
             self.UAV_data, thermal, flight_conditions
@@ -983,10 +1654,10 @@ class MultiUAVController:
         if len(FLT_track[uav_id]['X']) > 0:
             prev_x = FLT_track[uav_id]['X'][-1]
             prev_y = FLT_track[uav_id]['Y'][-1]
-            dx = pos_enu['X'] - prev_x
-            dy = pos_enu['Y'] - prev_y
+            dx = pos_enu['X'] - prev_x  # delta East
+            dy = pos_enu['Y'] - prev_y  # delta North
             if abs(dx) > 0.1 or abs(dy) > 0.1:
-                bearing = np.arctan2(dx, dy)  # Bearing ENU
+                bearing = np.arctan2(dy, dx)  # Convention math : atan2(dNorth, dEast)
             else:
                 bearing = FLT_track[uav_id]['bearing'][-1] if FLT_track[uav_id]['bearing'] else 0.0
         else:
@@ -1188,12 +1859,28 @@ async def run_multi_uav_simulation():
         center_y = 3000.0
         center_z = 400.0  # 400m au-dessus
         
+        # ========== ROS2 THERMAL BRIDGE (Gazebo ↔ Algorithm) ==========
+        # Start the bridge BEFORE scenario generation so that thermals created
+        # by the ROS2 thermal_generator_node (running in Gazebo) are received
+        # and converted into Thermal objects for the planning algorithm.
+        #
+        # Launch the generator first:
+        #   ros2 launch autosoaring_pkg autosoaring_launch.py mode:=generator
+        #
+        # The bridge subscribes to /thermal_snapshot and populates active_thermals
+        # and thermal_map automatically.
+        sim_origin_lat = controller.bridges[0].simulation_origin['lat']
+        sim_origin_lon = controller.bridges[0].simulation_origin['lon']
+        thermal_bridge = ThermalROSBridge(origin_lat=sim_origin_lat, origin_lon=sim_origin_lon)
+        thermal_bridge.start()
+        
         # ========== GÉNÉRATION SCÉNARIO BASÉE SUR LES POSITIONS HOME ==========
         scenario_gen = ScenarioGenerator()
         surveillance_objects = None
-        active_thermals = dict()
-        thermal_map = ThermalMap()
-        thermal_evaluator = ThermalEvaluator(params, UAV_data)
+        # active_thermals and thermal_map are now managed by the ROS2 bridge
+        # The bridge continuously updates them from Gazebo thermal_generator_node
+        active_thermals = thermal_bridge.get_active_thermals()
+        thermal_map = thermal_bridge.get_thermal_map()
         
         if scenario == TestScenario.PRELIMINARY_COLLISION:
             # Les drones partent de leurs positions home et convergent vers le centre
@@ -1214,20 +1901,28 @@ async def run_multi_uav_simulation():
             allow_glide = True
             start_positions, end_position, obstacles = scenario_gen.generate_trajectory_optimal_scenario(nUAVs, params, home_positions, allow_glide)
             params['obstacles'] = obstacles
-            thermal_generator = ThermalGenerator(params)
-            num_thermals = max(2, nUAVs // 3)
-            active_thermals = thermal_generator.generate_random_thermals(
-                num_thermals, obstacles, params['current_simulation_time']
-            )
-            print(f'✓ {len(active_thermals)} thermiques actives')
+            # Thermiques exclusivement depuis Gazebo via ROS2 bridge (thermal_generator_node)
+            print("⏳ Attente des thermiques Gazebo via ROS2 bridge...")
+            if thermal_bridge.wait_for_thermals(timeout=60.0):
+                active_thermals = thermal_bridge.get_active_thermals()
+                print(f'✓ {len(active_thermals)} thermiques reçues de Gazebo')
+            else:
+                print('⚠️  Aucune thermique reçue de Gazebo — la simulation continuera sans thermiques')
+                print('    Vérifiez que thermal_generator_node tourne : ros2 launch autosoaring_pkg autosoaring_launch.py mode:=generator')
             print(f"\n✓ Scénario trajectoire optimale (planeur) vers ({end_position['X']:.0f}, {end_position['Y']:.0f})")
             
         elif scenario == TestScenario.ENDURANCE:
             # Positions de départ = positions home réelles des UAVs
-            thermal_generator = ThermalGenerator(params)
             obstacles = generate_random_obstacles(3, params)
             params['obstacles'] = obstacles
-            active_thermals, thermal_stats = scenario_gen.generate_endurance_scenario(nUAVs, params, thermal_generator, obstacles)
+            # Thermiques exclusivement depuis Gazebo via ROS2 bridge
+            print("⏳ Attente des thermiques Gazebo via ROS2 bridge...")
+            if thermal_bridge.wait_for_thermals(timeout=60.0):
+                active_thermals = thermal_bridge.get_active_thermals()
+                print(f'✓ {len(active_thermals)} thermiques reçues de Gazebo')
+            else:
+                print('⚠️  Aucune thermique reçue de Gazebo — la simulation continuera sans thermiques')
+                print('    Vérifiez que thermal_generator_node tourne : ros2 launch autosoaring_pkg autosoaring_launch.py mode:=generator')
             metrics.thermals_generated = len(active_thermals)
             allow_glide = True
             # Utiliser les positions home réelles avec bearing vers le centre
@@ -1242,27 +1937,22 @@ async def run_multi_uav_simulation():
             obstacles = generate_random_obstacles(5, params)
             params['obstacles'] = obstacles
             allow_glide = True
-            thermal_generator = ThermalGenerator(params)
-            num_thermals = max(3, nUAVs // 2)
-            active_thermals = thermal_generator.generate_random_thermals(
-                num_thermals, obstacles, params['current_simulation_time']
-            )
-            print(f'✓ {len(active_thermals)} thermiques actives')
+            # Thermiques exclusivement depuis Gazebo via ROS2 bridge
+            print("⏳ Attente des thermiques Gazebo via ROS2 bridge...")
+            if thermal_bridge.wait_for_thermals(timeout=60.0):
+                active_thermals = thermal_bridge.get_active_thermals()
+                print(f'✓ {len(active_thermals)} thermiques reçues de Gazebo')
+            else:
+                print('⚠️  Aucune thermique reçue de Gazebo — la simulation continuera sans thermiques')
+                print('    Vérifiez que thermal_generator_node tourne : ros2 launch autosoaring_pkg autosoaring_launch.py mode:=generator')
             start_positions = {u: home_positions[u] for u in range(nUAVs)}
             print(f"\n✓ Scénario couverture: {len(surveillance_objects)} objets à surveiller")
         
         
         # ========== CALCULS ATMOSPHÉRIQUES ==========
-        ACC_SEA_LEVEL = 9.80665
-        T_SEA_LEVEL = 288.15
-        RHO_SEA_LEVEL = 1.225
-        MEAN_EARTH_RADIUS = 6371009
-        TROPO_LAPSE_RATE = -0.0065
-        R = 287.058
-        
-        grav_accel = ACC_SEA_LEVEL * (MEAN_EARTH_RADIUS / (MEAN_EARTH_RADIUS + params['working_floor']))
-        T_fin = T_SEA_LEVEL + TROPO_LAPSE_RATE * params['working_floor']
-        air_density = RHO_SEA_LEVEL * (T_fin / T_SEA_LEVEL)**(-grav_accel / (TROPO_LAPSE_RATE * R) - 1)
+        atm = _compute_atmosphere(params['working_floor'])
+        grav_accel = atm['grav']
+        air_density = atm['air_density']
         
         # ========== INITIALISATION UAVs ==========
         # Champ de vision pour détection d'objets et espacement trajectoires
@@ -1328,7 +2018,9 @@ async def run_multi_uav_simulation():
             FLT_track[u]['soaring_start_time'] = None
             FLT_track[u]['seeking_thermal'] = False
             FLT_track[u]['seeking_thermal_id'] = None
+            FLT_track[u]['seeking_wp_idx'] = None  # Index du WP de secours inséré dans GOAL_WPs
             FLT_track[u]['visited_thermals'] = set()  # Thermiques déjà visitées par cet UAV
+            FLT_track[u]['thermal_exit_cooldown'] = {}  # {thermal_id: exit_time} cooldown après sortie
 
         # Fonction pour générer et évaluer la trajectoire d'un UAV
         async def generate_trajectory_for_uav(u):
@@ -1426,6 +2118,10 @@ async def run_multi_uav_simulation():
                 print("\n✓ Tous les UAVs ont atteint leurs objectifs!")
                 break
             
+            # Synchroniser les positions réelles MAVSDK → FLT_track
+            # avant l'algorithme de décision pour qu'il travaille avec les vraies positions
+            await controller.sync_all_positions_from_mavsdk(FLT_track, FLT_conditions)
+            
             # Mesurer le temps de décision de l'algorithme
             algo_start_time = time.perf_counter()
             
@@ -1462,7 +2158,45 @@ async def run_multi_uav_simulation():
             current_time = params['current_simulation_time']
             
             # ========== GESTION THERMIQUES, ORBITES ET SECOURS PAR UAV ==========
+            # Refresh active_thermals from the ROS2 bridge (picks up new/expired thermals from Gazebo)
+            if thermal_bridge.has_thermals():
+                active_thermals = thermal_bridge.get_active_thermals()
             has_thermals = bool(thermal_map and active_thermals)
+            
+            # --- Affichage périodique des thermiques ROS reçues ---
+            if iteration == 0 or (iteration % 100 == 0 and has_thermals):
+                print(f"\n{'='*60}")
+                print(f"🌡️  THERMIQUES ROS ACTIVES (iter {iteration}, t_sim={current_time:.1f}s)")
+                print(f"{'='*60}")
+                if not active_thermals:
+                    print("  ❌ Aucune thermique reçue du bridge ROS2")
+                    print(f"     Bridge update: {thermal_bridge.seconds_since_last_update():.1f}s ago")
+                else:
+                    print(f"  Nombre de thermiques actives: {len(active_thermals)}")
+                    for tid, th in active_thermals.items():
+                        th_obj = th
+                        is_ros = getattr(th_obj, 'ros_managed', False)
+                        print(f"  [{tid}] pos=({th_obj.x:.0f}, {th_obj.y:.0f}) "
+                              f"r={th_obj.radius:.0f}m strength={th_obj.strength:.1f}m/s "
+                              f"{'[ROS]' if is_ros else '[local]'}")
+                    # Distances UAV → thermique la plus proche
+                    for u in range(nUAVs):
+                        if FLT_track[u]['X']:
+                            ux, uy = FLT_track[u]['X'][-1], FLT_track[u]['Y'][-1]
+                            min_dist = float('inf')
+                            nearest_tid = None
+                            for tid, th in active_thermals.items():
+                                th_obj = th
+                                d = np.sqrt((ux - th_obj.x)**2 + (uy - th_obj.y)**2)
+                                if d < min_dist:
+                                    min_dist = d
+                                    nearest_tid = tid
+                            if nearest_tid is not None:
+                                th_obj = active_thermals[nearest_tid]
+                                inside = "DANS" if min_dist <= th_obj.radius else "hors"
+                                print(f"  UAV {u}: ({ux:.0f},{uy:.0f}) → thermique {nearest_tid} "
+                                      f"dist={min_dist:.0f}m ({inside} rayon={th_obj.radius:.0f}m)")
+                print(f"{'='*60}\n")
             z_lower = params['Z_lower_bound']
             low_alt_margin = 100.0
             
@@ -1487,9 +2221,11 @@ async def run_multi_uav_simulation():
                                     alt_gain=eval_result.get('altitude_gain', 0)
                                 )
                             if thermal_id is not None and thermal_id in active_thermals:
-                                thermal_obj = _resolve_thermal_obj(active_thermals[thermal_id])
+                                thermal_obj = active_thermals[thermal_id]
                                 await controller.transition_to_soaring(u, thermal_obj)
                             FLT_track[u]['in_evaluation'] = False
+                            # Nettoyer l'obstacle d'évaluation
+                            _remove_evaluation_obstacles(params, u, thermal_id)
                             FLT_track[u]['flight_mode'].append('soaring')
                             FLT_track[u]['soaring_start_time'] = current_time
                         else:
@@ -1501,6 +2237,8 @@ async def run_multi_uav_simulation():
                                 )
                             await controller.stop_thermal_orbit(u)
                             FLT_track[u]['in_evaluation'] = False
+                            # Nettoyer l'obstacle d'évaluation
+                            _remove_evaluation_obstacles(params, u, thermal_id)
                             # Marquer comme visitée pour ne pas retenter
                             if thermal_id is not None:
                                 FLT_track[u]['visited_thermals'].add(thermal_id)
@@ -1521,20 +2259,33 @@ async def run_multi_uav_simulation():
                     should_exit_soaring = False
                     exit_reason = ""
                     
-                    if current_alt >= params['Z_upper_bound'] * 0.95:
+                    # 1. Thermique disparue de la liste ROS (retirée par le générateur)
+                    if thermal_id is not None and thermal_id not in active_thermals:
                         should_exit_soaring = True
-                        exit_reason = f"altitude max ({current_alt:.0f}m)"
-                    elif alt_var['duration'] > 30 and alt_var['avg_climb_rate'] < 0.1:
-                        should_exit_soaring = True
-                        exit_reason = f"thermique épuisée (climb={alt_var['avg_climb_rate']:.2f}m/s)"
-                    elif soaring_duration > 300:
-                        should_exit_soaring = True
-                        exit_reason = f"durée max ({soaring_duration:.0f}s)"
+                        exit_reason = f"thermique {thermal_id} retirée (disparue des actives)"
+                    # 2. Thermique inactive (durée de vie écoulée)
                     elif thermal_id is not None and thermal_id in active_thermals:
-                        t_obj = _resolve_thermal_obj(active_thermals[thermal_id])
+                        t_obj = active_thermals[thermal_id]
                         if hasattr(t_obj, 'is_active') and not t_obj.is_active(current_time):
                             should_exit_soaring = True
-                            exit_reason = "thermique inactive"
+                            exit_reason = "thermique inactive (durée de vie écoulée)"
+                    # 3. Altitude plafond atteinte
+                    if not should_exit_soaring and current_alt >= params['Z_upper_bound'] * 0.95:
+                        should_exit_soaring = True
+                        exit_reason = f"altitude plafond ({current_alt:.0f}m ≥ {params['Z_upper_bound']*0.95:.0f}m)"
+                    # 4. Thermique épuisée : climb rate trop faible après un temps suffisant
+                    #    Condition renforcée : durée > 45s ET perte nette d'altitude (climb < 0)
+                    #    OU durée > 60s ET gain négligeable (climb < 0.1)
+                    if not should_exit_soaring and alt_var['duration'] > 45 and alt_var['avg_climb_rate'] < 0:
+                        should_exit_soaring = True
+                        exit_reason = f"perte d'altitude nette après {alt_var['duration']:.0f}s (climb={alt_var['avg_climb_rate']:.2f}m/s)"
+                    elif not should_exit_soaring and alt_var['duration'] > 60 and alt_var['avg_climb_rate'] < 0.1:
+                        should_exit_soaring = True
+                        exit_reason = f"gain négligeable après {alt_var['duration']:.0f}s (climb={alt_var['avg_climb_rate']:.2f}m/s)"
+                    # 5. Durée max de soaring
+                    if not should_exit_soaring and soaring_duration > 300:
+                        should_exit_soaring = True
+                        exit_reason = f"durée max ({soaring_duration:.0f}s)"
                     
                     if should_exit_soaring:
                         print(f"\n🔄 UAV {u}: Sortie soaring MAVSDK ({exit_reason})")
@@ -1549,16 +2300,15 @@ async def run_multi_uav_simulation():
                         }
                         exit_thermal = None
                         if thermal_id is not None and thermal_map:
-                            thermal_info = thermal_map.detected_thermals.get(thermal_id)
-                            if thermal_info:
-                                exit_thermal = thermal_info.get('thermal')
+                            exit_thermal = thermal_map.get_thermal_obj(thermal_id)
                         current_wp_indices[u] = find_nearest_waypoint(
                             current_pos, GOAL_WPs[u], params['obstacles'],
                             exit_thermal, current_wp_indices[u]
                         )
-                        # Marquer la thermique comme visitée pour éviter d'y revenir
+                        # Marquer la thermique comme visitée + enregistrer cooldown
                         if thermal_id is not None:
                             FLT_track[u]['visited_thermals'].add(thermal_id)
+                            FLT_track[u]['thermal_exit_cooldown'][thermal_id] = current_time
                         FLT_track[u]['current_thermal_id'] = None
                         
                         if alt_summary:
@@ -1574,42 +2324,105 @@ async def run_multi_uav_simulation():
                         'Z': FLT_track[u]['Z'][-1]
                     }
                     
-                    # Réinitialiser la liste des thermiques visitées si altitude < working_floor
+                    # Réinitialiser les thermiques visitées dont le cooldown a expiré (60s)
+                    # Ne PAS faire un reset global basé sur l'altitude (causait des boucles
+                    # sortie/re-entrée immédiates quand le drone est encore dans le rayon)
+                    THERMAL_COOLDOWN_SECONDS = 60.0
+                    expired_cooldowns = [
+                        tid for tid, exit_t in FLT_track[u]['thermal_exit_cooldown'].items()
+                        if current_time - exit_t > THERMAL_COOLDOWN_SECONDS
+                    ]
+                    for tid in expired_cooldowns:
+                        FLT_track[u]['visited_thermals'].discard(tid)
+                        del FLT_track[u]['thermal_exit_cooldown'][tid]
+                        if tid in active_thermals:
+                            print(f"🔓 UAV {u}: Cooldown expiré pour thermique {tid} — disponible à nouveau")
+                    # Reset uniquement les thermiques sans cooldown actif si altitude basse
                     if current_pos['Z'] < params['working_floor'] and FLT_track[u]['visited_thermals']:
-                        print(f"↓ UAV {u}: Altitude sous working_floor ({current_pos['Z']:.0f}m) → Reset thermiques visitées")
-                        FLT_track[u]['visited_thermals'] = set()
+                        cooldown_ids = set(FLT_track[u]['thermal_exit_cooldown'].keys())
+                        resettable = FLT_track[u]['visited_thermals'] - cooldown_ids
+                        if resettable:
+                            print(f"↓ UAV {u}: Altitude sous working_floor ({current_pos['Z']:.0f}m) → Reset {len(resettable)} thermique(s) (hors cooldown)")
+                            FLT_track[u]['visited_thermals'] -= resettable
                     
                     detected_thermal_id = detect_thermal_at_position(
                         current_pos, active_thermals, current_time
                     )
                     
+                    # Log de détection détaillé (toutes les 50 itérations)
+                    if iteration % 50 == 0 and detected_thermal_id is None:
+                        # Trouver la thermique la plus proche pour le debug
+                        min_d = float('inf')
+                        closest_tid = None
+                        for tid, th in active_thermals.items():
+                            th_obj = th
+                            d = np.sqrt((current_pos['X'] - th_obj.x)**2 + (current_pos['Y'] - th_obj.y)**2)
+                            if d < min_d:
+                                min_d = d
+                                closest_tid = tid
+                        if closest_tid is not None:
+                            th_obj = active_thermals[closest_tid]
+                            is_act = th_obj.is_active(current_time)
+                            lift = th_obj.get_lift_rate(min_d)
+                            print(f"  [detect] UAV {u}: pas de thermique — plus proche={closest_tid} "
+                                  f"dist={min_d:.0f}m (rayon={th_obj.radius:.0f}m) "
+                                  f"is_active={is_act} lift@dist={lift:.2f}m/s")
+                    
                     if detected_thermal_id is not None:
+                        # Marquer comme physiquement détectée par un drone
+                        if thermal_map:
+                            thermal_map.mark_detected(detected_thermal_id)
                         # Ignorer les thermiques déjà visitées par cet UAV
                         if detected_thermal_id in FLT_track[u]['visited_thermals']:
                             pass  # Ne pas réentrer dans cette thermique
                         else:
-                            thermal_info = thermal_map.detected_thermals.get(detected_thermal_id)
+                            thermal_info = thermal_map.get_info(detected_thermal_id)
+                            is_evaluated = thermal_info.get('evaluated', False) if thermal_info else False
+                            is_viable = is_evaluated and thermal_info.get('alt_gain', 0) > 0
+                            is_bad = is_evaluated and thermal_info.get('alt_gain', 0) <= 0
                             
-                            if thermal_info and thermal_info.get('evaluated') and thermal_info.get('alt_gain', 0) > 0:
-                                # Vérifier la séparation en altitude avec les autres drones dans cette thermique
+                            if is_bad:
+                                # Cas C: Thermique connue non viable → marquer visitée pour ne plus détecter
+                                FLT_track[u]['visited_thermals'].add(detected_thermal_id)
+                            
+                            elif is_viable:
+                                # Cas B: Thermique connue viable → soaring direct
                                 alt_conflict = _check_thermal_altitude_conflict(
                                     u, detected_thermal_id, current_pos['Z'],
                                     controller, FLT_track, nUAVs
                                 )
                                 if not alt_conflict:
-                                    thermal_obj = _resolve_thermal_obj(active_thermals[detected_thermal_id])
+                                    # Annuler seeking si en cours (thermique trouvée en route vers secours)
+                                    if FLT_track[u]['seeking_thermal']:
+                                        print(f"  UAV {u}: Thermique {detected_thermal_id} détectée en route → annulation seeking vers {FLT_track[u]['seeking_thermal_id']}")
+                                        _cancel_seeking(FLT_track[u], GOAL_WPs[u], current_wp_indices, u)
+                                    thermal_obj = active_thermals[detected_thermal_id]
                                     FLT_track[u]['current_thermal_id'] = detected_thermal_id
                                     FLT_track[u]['flight_mode'].append('soaring')
                                     FLT_track[u]['soaring_start_time'] = current_time
                                     print(f"\n🔄 UAV {u}: Thermique {detected_thermal_id} connue viable → Orbite soaring MAVSDK")
-                                    await controller.start_thermal_orbit(u, thermal_obj, current_pos['Z'], mode='soaring')
+                                    orbit_ok = await controller.start_thermal_orbit(u, thermal_obj, current_pos['Z'], mode='soaring')
+                                    if not orbit_ok:
+                                        FLT_track[u]['flight_mode'][-1] = 'glide'
+                                        FLT_track[u]['soaring_start_time'] = None
+                                        FLT_track[u]['current_thermal_id'] = None
+                                        print(f"  UAV {u}: Échec orbite soaring, retour en glide")
                                     continue
                                 else:
                                     print(f"  UAV {u}: Thermique {detected_thermal_id} occupée à altitude similaire, passage")
                             
-                            elif not thermal_info:
-                                thermal_obj = _resolve_thermal_obj(active_thermals[detected_thermal_id])
-                                thermal_map.add_thermal_detection(detected_thermal_id, thermal_obj, current_time)
+                            else:
+                                # Cas A: Thermique inconnue OU connue mais pas encore évaluée
+                                # (le bridge ROS pré-remplit thermal_map avec evaluated=False)
+                                # → lancer une orbite d'évaluation
+                                # Annuler seeking si en cours
+                                if FLT_track[u]['seeking_thermal']:
+                                    print(f"  UAV {u}: Thermique {detected_thermal_id} détectée en route → annulation seeking vers {FLT_track[u]['seeking_thermal_id']}")
+                                    _cancel_seeking(FLT_track[u], GOAL_WPs[u], current_wp_indices, u)
+                                thermal_obj = active_thermals[detected_thermal_id]
+                                # Ajouter à la carte seulement si pas déjà présente
+                                if not thermal_info:
+                                    thermal_map.ensure_exists(detected_thermal_id, thermal_obj, current_time)
                                 
                                 FLT_track[u]['in_evaluation'] = True
                                 FLT_track[u]['current_thermal_id'] = detected_thermal_id
@@ -1626,8 +2439,14 @@ async def run_multi_uav_simulation():
                                     'thermal_id': detected_thermal_id, 'type': 'evaluation_zone'
                                 })
                                 
-                                print(f"\n🌀 UAV {u}: Nouvelle thermique {detected_thermal_id} détectée → Orbite d'évaluation MAVSDK")
-                                await controller.start_thermal_orbit(u, thermal_obj, current_pos['Z'], mode='evaluation')
+                                eval_label = "non évaluée" if thermal_info else "nouvelle"
+                                print(f"\n🌀 UAV {u}: Thermique {detected_thermal_id} ({eval_label}) détectée → Orbite d'évaluation MAVSDK")
+                                orbit_ok = await controller.start_thermal_orbit(u, thermal_obj, current_pos['Z'], mode='evaluation')
+                                if not orbit_ok:
+                                    FLT_track[u]['in_evaluation'] = False
+                                    FLT_track[u]['current_thermal_id'] = None
+                                    _remove_evaluation_obstacles(params, u, detected_thermal_id)
+                                    print(f"  UAV {u}: Échec orbite évaluation, retour en glide")
                                 continue
                 
                 # --- SECOURS BASSE ALTITUDE (UAV libre, pas en orbite, pas en soaring) ---
@@ -1635,17 +2454,100 @@ async def run_multi_uav_simulation():
                     # Vérifier seeking en cours
                     if FLT_track[u]['seeking_thermal']:
                         target_tid = FLT_track[u]['seeking_thermal_id']
-                        if target_tid is not None and target_tid in active_thermals:
-                            t_obj = _resolve_thermal_obj(active_thermals[target_tid])
+                        seeking_cancelled = False
+                        
+                        # 1. Thermique cible disparue → annuler seeking
+                        if target_tid is None or target_tid not in active_thermals:
+                            print(f"⚠️  UAV {u}: Thermique de secours {target_tid} disparue → Annulation seeking")
+                            _cancel_seeking(FLT_track[u], GOAL_WPs[u], current_wp_indices, u)
+                            seeking_cancelled = True
+                        
+                        # 2. Altitude remontée → annuler seeking (hystérésis x2 pour éviter oscillations)
+                        elif FLT_track[u]['Z'][-1] > z_lower + low_alt_margin * 2:
+                            print(f"↑ UAV {u}: Altitude remontée ({FLT_track[u]['Z'][-1]:.0f}m > "
+                                  f"{z_lower + low_alt_margin * 2:.0f}m) → Annulation seeking")
+                            _cancel_seeking(FLT_track[u], GOAL_WPs[u], current_wp_indices, u)
+                            seeking_cancelled = True
+                        
+                        # 3. Vérifier arrivée à la thermique
+                        else:
+                            t_obj = active_thermals[target_tid]
                             dist_to_thermal = np.sqrt(
                                 (FLT_track[u]['X'][-1] - t_obj.x)**2 + 
                                 (FLT_track[u]['Y'][-1] - t_obj.y)**2
                             )
                             if dist_to_thermal <= t_obj.radius:
-                                print(f"✅ UAV {u}: Thermique de secours {target_tid} atteinte → Détection automatique")
-                                FLT_track[u]['seeking_thermal'] = False
-                                FLT_track[u]['seeking_thermal_id'] = None
-                        continue
+                                # Vérifier si ce thermique a déjà été évalué non viable
+                                thermal_already_evaluated_bad = False
+                                if thermal_map:
+                                    t_info = thermal_map.get_info(target_tid)
+                                    if t_info and t_info.get('evaluated') and t_info.get('alt_gain', 0) <= 0:
+                                        thermal_already_evaluated_bad = True
+                                
+                                if thermal_already_evaluated_bad:
+                                    print(f"⚠️  UAV {u}: Thermique de secours {target_tid} atteinte mais déjà évaluée non viable → Ignorée")
+                                    FLT_track[u]['seeking_thermal'] = False
+                                    FLT_track[u]['seeking_thermal_id'] = None
+                                    FLT_track[u]['seeking_wp_idx'] = None
+                                    FLT_track[u]['visited_thermals'].add(target_tid)
+                                else:
+                                    print(f"✅ UAV {u}: Thermique de secours {target_tid} atteinte → Lancement orbite")
+                                    FLT_track[u]['seeking_thermal'] = False
+                                    FLT_track[u]['seeking_thermal_id'] = None
+                                    FLT_track[u]['seeking_wp_idx'] = None
+                                    
+                                    # Vérifier si déjà évaluée comme viable → soaring direct
+                                    t_info_rescue = thermal_map.get_info(target_tid) if thermal_map else None
+                                    if t_info_rescue and t_info_rescue.get('evaluated') and t_info_rescue.get('alt_gain', 0) > 0:
+                                        # Thermique connue viable → orbite soaring directe
+                                        alt_conflict = _check_thermal_altitude_conflict(
+                                            u, target_tid, FLT_track[u]['Z'][-1],
+                                            controller, FLT_track, nUAVs
+                                        )
+                                        if not alt_conflict:
+                                            FLT_track[u]['current_thermal_id'] = target_tid
+                                            FLT_track[u]['flight_mode'].append('soaring')
+                                            FLT_track[u]['soaring_start_time'] = current_time
+                                            print(f"  UAV {u}: Thermique {target_tid} connue viable → Soaring MAVSDK")
+                                            orbit_ok = await controller.start_thermal_orbit(u, t_obj, FLT_track[u]['Z'][-1], mode='soaring')
+                                            if not orbit_ok:
+                                                FLT_track[u]['flight_mode'][-1] = 'glide'
+                                                FLT_track[u]['soaring_start_time'] = None
+                                                FLT_track[u]['current_thermal_id'] = None
+                                                print(f"  UAV {u}: Échec orbite soaring secours")
+                                        else:
+                                            print(f"  UAV {u}: Thermique {target_tid} occupée à altitude similaire")
+                                    else:
+                                        # Thermique inconnue → orbite d'évaluation
+                                        if thermal_map:
+                                            thermal_map.ensure_exists(target_tid, t_obj, current_time)
+                                        FLT_track[u]['in_evaluation'] = True
+                                        FLT_track[u]['current_thermal_id'] = target_tid
+                                        FLT_track[u]['evaluation_start_altitude'] = FLT_track[u]['Z'][-1]
+                                        
+                                        evaluation_obstacle = {
+                                            'X': t_obj.x, 'Y': t_obj.y,
+                                            'radius': t_obj.radius,
+                                            'type': 'evaluation_zone', 'uav_id': u
+                                        }
+                                        eval_poly = convert_cylindrical_obstacles_to_polygons([evaluation_obstacle])
+                                        params['obstacles'].append({
+                                            'vertices': eval_poly[0], 'uav_id': u,
+                                            'thermal_id': target_tid, 'type': 'evaluation_zone'
+                                        })
+                                        
+                                        print(f"  UAV {u}: Thermique {target_tid} inconnue → Évaluation MAVSDK")
+                                        orbit_ok = await controller.start_thermal_orbit(u, t_obj, FLT_track[u]['Z'][-1], mode='evaluation')
+                                        if not orbit_ok:
+                                            FLT_track[u]['in_evaluation'] = False
+                                            FLT_track[u]['current_thermal_id'] = None
+                                            _remove_evaluation_obstacles(params, u, target_tid)
+                                            print(f"  UAV {u}: Échec orbite évaluation secours")
+                        
+                        # Si seeking est toujours actif (pas annulé), skip le check altitude
+                        if not seeking_cancelled:
+                            continue
+                        # Sinon, tomber dans le check altitude ci-dessous
                     
                     current_alt = FLT_track[u]['Z'][-1]
                     if current_alt <= z_lower + low_alt_margin:
@@ -1661,13 +2563,20 @@ async def run_multi_uav_simulation():
                         best_thermal_id = None
                         best_distance = float('inf')
                         
-                        for tid, t_obj in active_thermals.items():
-                            thermal = _resolve_thermal_obj(t_obj)
+                        # Secours : ne considérer que les thermiques déjà détectées par un drone
+                        detected_thermals_map = thermal_map.get_detected_thermals() if thermal_map else {}
+                        for tid, t_obj in detected_thermals_map.items():
+                            thermal = t_obj
                             if not thermal.is_active(current_time):
                                 continue
                             # Ignorer les thermiques déjà visitées (sauf si altitude < working_floor)
                             if tid in FLT_track[u]['visited_thermals']:
                                 continue
+                            # Ignorer les thermiques déjà évaluées comme non viables
+                            if thermal_map:
+                                t_info = thermal_map.get_info(tid)
+                                if t_info and t_info.get('evaluated') and t_info.get('alt_gain', 0) <= 0:
+                                    continue
                             dist = np.sqrt((current_x - thermal.x)**2 + (current_y - thermal.y)**2)
                             if dist < max_glide_range and dist < best_distance:
                                 # Vérifier séparation altitude avec drones déjà dans cette thermique
@@ -1680,7 +2589,7 @@ async def run_multi_uav_simulation():
                                     best_distance = dist
                         
                         if best_thermal_id is not None:
-                            thermal = _resolve_thermal_obj(active_thermals[best_thermal_id])
+                            thermal = active_thermals[best_thermal_id]
                             wp_idx = current_wp_indices[u]
                             time_to_reach = best_distance / current_airspeed if current_airspeed > 0 else 999
                             alt_at_arrival = current_alt - (sink_rate * time_to_reach)
@@ -1691,6 +2600,7 @@ async def run_multi_uav_simulation():
                             
                             FLT_track[u]['seeking_thermal'] = True
                             FLT_track[u]['seeking_thermal_id'] = best_thermal_id
+                            FLT_track[u]['seeking_wp_idx'] = wp_idx
                             
                             print(f"\n⚠️  UAV {u}: Altitude basse ({current_alt:.0f}m) → "
                                   f"Redirection vers thermique {best_thermal_id} "
@@ -1722,6 +2632,11 @@ async def run_multi_uav_simulation():
             
             # Mise à jour PX4 pour tous les UAVs
             await controller.update_all_from_simulation(FLT_track, FLT_conditions)
+            
+            # Vérifier périodiquement si un drone a perdu le mode offboard
+            # (toutes les 10 itérations ≈ 11s pour éviter du spam)
+            if iteration % 10 == 0:
+                await controller.recover_offboard_all(FLT_track)
             
             # Verification atterissage d'urgence (batterie faible)
             for u in range(nUAVs):
@@ -1911,17 +2826,22 @@ async def run_multi_uav_simulation():
         # Atterrir tous les UAVs
         await controller.land_all()
         
+        # Arrêter le bridge ROS2
+        thermal_bridge.stop()
+        
         print("\n✓ Mission multi-UAV terminée avec succès!")
         
     except KeyboardInterrupt:
         print("\n\n⚠️  Interruption - Atterrissage d'urgence de tous les UAVs")
         await controller.land_all()
+        thermal_bridge.stop()
     except Exception as e:
         print(f"\n✗ Erreur: {e}")
         import traceback
         traceback.print_exc()
         try:
             await controller.land_all()
+            thermal_bridge.stop()
         except:
             pass
 

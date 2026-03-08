@@ -26,10 +26,11 @@ fi
 echo -e "${GREEN}Configuration: $NUM_UAVS UAVs${NC}"
 
 # Répertoires
-PX4_DIR="$HOME/GoToWP/updated_PX4-Autopilot"
+PX4_DIR="$HOME/GoToWP/PX4-Autopilot-soaring"
 MAVSDK_DIR="$HOME/MAVSDK"
 GOTOWP_DIR="$HOME/GoToWP"
 XRCE_DDS_DIR="$HOME/Micro-XRCE-DDS-Agent"
+AUTOSOARING_DIR="$GOTOWP_DIR/autosoaring/src"
 LOG_DIR="$GOTOWP_DIR/multi_uav_logs"
 
 # Configurer les chemins pour les plugins Gazebo custom
@@ -71,6 +72,10 @@ pkill -9 -f px4 2>/dev/null || true
 pkill -9 -f gazebo 2>/dev/null || true
 pkill -9 -f gzserver 2>/dev/null || true
 pkill -9 -f gzclient 2>/dev/null || true
+pkill -9 -f thermal_generator_node 2>/dev/null || true
+pkill -9 -f thermal_detection_node 2>/dev/null || true
+pkill -9 -f thermal_mapping_node 2>/dev/null || true
+pkill -9 -f battery_manager_node 2>/dev/null || true
 
 # Supprimer les logs
 rm -rf $LOG_DIR
@@ -84,6 +89,7 @@ echo -e "${GREEN}Logs seront sauvegardés dans: $LOG_DIR${NC}"
 declare -a PX4_PIDS
 declare -a MAVSDK_PIDS
 XRCE_DDS_PID=""
+ROS2_LAUNCH_PID=""
 
 # Fonction de nettoyage
 cleanup () {
@@ -105,6 +111,10 @@ cleanup () {
     if [ ! -z "$XRCE_DDS_PID" ]; then
         kill $XRCE_DDS_PID 2>/dev/null || true
     fi
+    # Tuer le launch ROS2 (thermal generator + autres nœuds)
+    if [ ! -z "$ROS2_LAUNCH_PID" ]; then
+        kill $ROS2_LAUNCH_PID 2>/dev/null || true
+    fi
     
     # Tuer Gazebo, px4 orphelins et mavsdk_server restants
     pkill -9 -f mavsdk_server 2>/dev/null || true
@@ -114,6 +124,10 @@ cleanup () {
     pkill -9 -f gazebo 2>/dev/null || true
     pkill -9 -f gzserver 2>/dev/null || true
     pkill -9 -f gzclient 2>/dev/null || true
+    pkill -9 -f thermal_generator_node 2>/dev/null || true
+    pkill -9 -f thermal_detection_node 2>/dev/null || true
+    pkill -9 -f thermal_mapping_node 2>/dev/null || true
+    pkill -9 -f battery_manager_node 2>/dev/null || true
     
     echo -e "${GREEN}✓ Nettoyage terminé${NC}"
     exit 0
@@ -248,7 +262,54 @@ done
 echo -e "\n${YELLOW}Attente de l'initialisation complète (5s)...${NC}"
 sleep 5
 
-# ========== ÉTAPE 5 : Vérification ==========
+# ========== ÉTAPE 5 : Lancer les nœuds ROS2 AutoSoaring ==========
+echo -e "\n${BLUE}=========================================="
+echo "Lancement du thermal generator ROS2"
+echo -e "==========================================${NC}"
+
+# Source ROS2 Jazzy + workspace autosoaring
+source /opt/ros/jazzy/setup.bash
+if [ -f "$AUTOSOARING_DIR/install/setup.bash" ]; then
+    source $AUTOSOARING_DIR/install/setup.bash
+    echo -e "${GREEN}✓ Workspace autosoaring sourcé${NC}"
+else
+    echo -e "${RED}❌ Workspace autosoaring non compilé. Compilez d'abord :${NC}"
+    echo "  cd $AUTOSOARING_DIR && colcon build"
+    cleanup
+    exit 1
+fi
+
+# Lancer le thermal generator node (crée les thermiques dans Gazebo + publie sur ROS2)
+ros2 launch autosoaring_pkg autosoaring_launch.py mode:=generator \
+    > $LOG_DIR/ros2_autosoaring.log 2>&1 &
+ROS2_LAUNCH_PID=$!
+echo -e "${GREEN}✓ ROS2 thermal_generator_node lancé (PID: $ROS2_LAUNCH_PID)${NC}"
+
+# Attendre que le topic /thermal_snapshot soit disponible
+echo -e "${YELLOW}Attente du topic /thermal_snapshot (max 30s)...${NC}"
+MAX_WAIT=30
+ELAPSED=0
+while [ $ELAPSED -lt $MAX_WAIT ]; do
+    if ros2 topic list 2>/dev/null | grep -q "/thermal_snapshot"; then
+        echo -e "${GREEN}✓ Topic /thermal_snapshot disponible après ${ELAPSED}s${NC}"
+        break
+    fi
+    if ! kill -0 $ROS2_LAUNCH_PID 2>/dev/null; then
+        echo -e "${RED}✗ ROS2 launch a échoué. Vérifiez $LOG_DIR/ros2_autosoaring.log${NC}"
+        cleanup
+        exit 1
+    fi
+    sleep 2
+    ELAPSED=$((ELAPSED + 2))
+done
+
+if [ $ELAPSED -ge $MAX_WAIT ]; then
+    echo -e "${YELLOW}⚠  Topic /thermal_snapshot non détecté en ${MAX_WAIT}s — le nœud tourne peut-être quand même${NC}"
+fi
+
+sleep 2
+
+# ========== ÉTAPE 6 : Vérification ==========
 echo -e "\n${BLUE}Vérification des processus...${NC}"
 ALL_OK=true
 
@@ -282,6 +343,37 @@ for i in "${!PX4_PIDS[@]}"; do
     fi
 done
 
+# Vérifier ROS2 thermal generator
+if ps -p $ROS2_LAUNCH_PID > /dev/null 2>&1; then
+    echo -e "${GREEN}✓ ROS2 AutoSoaring (PID $ROS2_LAUNCH_PID) : OK${NC}"
+else
+    echo -e "${RED}✗ ROS2 AutoSoaring (PID $ROS2_LAUNCH_PID) : Arrêté (vérifier $LOG_DIR/ros2_autosoaring.log)${NC}"
+    ALL_OK=false
+fi
+
+# Vérifier les messages Gazebo custom (thermal)
+echo -e "\n${BLUE}Vérification des messages Gazebo thermiques...${NC}"
+if gz msg -l 2>/dev/null | grep -q "gz.msgs.Thermal"; then
+    echo -e "${GREEN}✓ Types gz.msgs.Thermal / ThermalGroup enregistrés${NC}"
+else
+    echo -e "${RED}✗ Types gz.msgs.Thermal non trouvés — vérifiez GZ_DESCRIPTOR_PATH${NC}"
+    echo -e "${YELLOW}  Actuel: GZ_DESCRIPTOR_PATH=$GZ_DESCRIPTOR_PATH${NC}"
+    ALL_OK=false
+fi
+
+if gz topic -l 2>/dev/null | grep -q "thermal_updrafts"; then
+    echo -e "${GREEN}✓ Topic /world/default/thermal_updrafts disponible${NC}"
+    # Tenter de capturer un message (timeout 5s)
+    THERMAL_DATA=$(timeout 5 gz topic -e -n 1 -t /world/default/thermal_updrafts 2>/dev/null || true)
+    if [ -n "$THERMAL_DATA" ]; then
+        echo -e "${GREEN}✓ Messages thermiques reçus sur Gazebo transport${NC}"
+    else
+        echo -e "${YELLOW}⚠  Topic existe mais aucun message reçu en 5s (le générateur publie peut-être pas encore)${NC}"
+    fi
+else
+    echo -e "${YELLOW}⚠  Topic /world/default/thermal_updrafts pas encore disponible (le générateur démarrera bientôt)${NC}"
+fi
+
 if [ "$ALL_OK" = false ]; then
     echo -e "${RED}Certains processus ne sont pas lancés correctement${NC}"
     echo "Vérifiez les logs dans $LOG_DIR"
@@ -302,8 +394,12 @@ for ((i=0; i<$NUM_UAVS; i++)); do
 done
 
 echo -e "\n${YELLOW}Pour QGroundControl, connectez sur udp://:14550${NC}"
+echo -e "${BLUE}Topics ROS2 thermiques :${NC}"
+echo "  /thermal_snapshot   — Toutes les thermiques actives (pour l'algorithme)"
+echo "  /generated_thermals — Nouvelles thermiques (pour le mapping)"
+echo "  /thermal_removed    — IDs des thermiques expirées"
 
-# ========== ÉTAPE 6 : Lancer la simulation Python ==========
+# ========== ÉTAPE 7 : Lancer la simulation Python ==========
 echo -e "\n${BLUE}=========================================="
 echo "Lancement de la simulation Python"
 echo -e "==========================================${NC}"
@@ -315,6 +411,9 @@ echo -e "${YELLOW}Appuyez sur Entrée pour lancer la simulation Python...${NC}"
 read
 
 # Lancer le script Python
+# On source ROS2 + autosoaring pour que rclpy et thermal_ros_bridge soient accessibles
+source /opt/ros/jazzy/setup.bash
+source $AUTOSOARING_DIR/install/setup.bash
 source $GOTOWP_DIR/Mav/bin/activate
 python3 $GOTOWP_DIR/dronePx4.py
 

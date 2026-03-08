@@ -314,18 +314,36 @@ class PerformanceAnalyzer:
     @staticmethod
     def analyze_thermal_exploitation(thermals: list, FLT_track: dict, nUAVs: int) -> dict:
         """Analyser l'exploitation des thermiques"""
-        detected = sum(1 for t in thermals if t.get('detected', False))
-        exploited = sum(1 for t in thermals if t.get('exploited', False))
-        rejected = sum(1 for t in thermals if t.get('rejected', False))
+        detected = 0
+        exploited = 0
+        rejected = 0
+        for t in thermals:
+            if isinstance(t, dict):
+                if t.get('detected', False):
+                    detected += 1
+                if t.get('exploited', False):
+                    exploited += 1
+                if t.get('rejected', False):
+                    rejected += 1
+            else:
+                # Objet Thermal : compter comme détecté (actif dans la simulation)
+                detected += 1
         
         # Compter par UAV
         thermals_per_uav = {}
         for u in range(nUAVs):
             count = 0
             for t in thermals:
-                if u in t.get('exploited_by', []):
-                    count += 1
+                if isinstance(t, dict):
+                    if u in t.get('exploited_by', []):
+                        count += 1
+                else:
+                    # Vérifier si cet UAV a visité cette thermique via FLT_track
+                    tid = getattr(t, 'id', None)
+                    if tid is not None and tid in FLT_track.get(u, {}).get('visited_thermals', set()):
+                        count += 1
             thermals_per_uav[u] = count
+            exploited += count
         
         return {
             'detected': detected,

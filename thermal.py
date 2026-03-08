@@ -1,5 +1,6 @@
 import numpy as np
-from typing import Dict, List
+import threading
+from typing import Dict, List, Optional
 
 from compute import get_climb_rate, point_in_polygon
 
@@ -36,42 +37,151 @@ class Thermal:
         return self.strength
 
 class ThermalMap:
-    """Carte partagée des thermiques détectés par tous les drones"""
-    
+    """
+    Carte partagée et **thread-safe** des thermiques.
+
+    Source de vérité unique :
+      – le thread ROS2 écrit via ``update_from_snapshot`` / ``remove_thermal``
+      – le thread asyncio principal lit via ``get_active_thermals`` / ``get_info``
+        et écrit l'évaluation via ``mark_evaluated``.
+
+    Structure interne (_entries) :
+        {thermal_id: {'thermal': Thermal,
+                      'detection_time': float,
+                      'detected':       bool,   # un drone l'a physiquement traversée
+                      'evaluated':      bool,
+                      'alt_gain':       float}}
+    """
+
     def __init__(self):
-        self.detected_thermals = {}  # {thermal_id: {'thermal': Thermal, 'detection_time': float, 'evaluated': bool, 'alt_gain': bool}}
-        self.memory_duration = 600  # 10 minutes en secondes
+        self._entries: Dict[int, dict] = {}
+        self._lock = threading.Lock()
 
-    def add_thermal_detection(self, thermal_id: int, thermal: Thermal, detection_time: float):
-        """Ajoute un thermique détecté à la carte partagée"""
-        self.detected_thermals[thermal_id] = {
-            'thermal': thermal,
-            'detection_time': detection_time,
-            'evaluated': False,
-            'alt_gain': False
-        }
+    # ------------------------------------------------------------------
+    # Bridge API (appelé depuis le thread ROS2)
+    # ------------------------------------------------------------------
+    def update_from_snapshot(self, new_thermals: Dict[int, 'Thermal'], now: float):
+        """
+        Mise à jour atomique depuis un snapshot ROS.
+        - Ajoute les nouvelles thermiques.
+        - Met à jour l'objet Thermal des thermiques existantes (position,
+          force, rayon…) tout en **conservant** le statut d'évaluation.
+        - Supprime les thermiques qui ne sont plus dans le snapshot.
+        """
+        with self._lock:
+            for tid, th in new_thermals.items():
+                if tid in self._entries:
+                    # Mettre à jour l'objet Thermal (position peut bouger)
+                    self._entries[tid]['thermal'] = th
+                else:
+                    self._entries[tid] = {
+                        'thermal': th,
+                        'detection_time': now,
+                        'detected': False,
+                        'evaluated': False,
+                        'alt_gain': 0.0,
+                    }
+            stale = [k for k in self._entries if k not in new_thermals]
+            for k in stale:
+                del self._entries[k]
 
-    def get_active_thermals(self, current_time: float) -> Dict:
-        """Retourne les thermiques encore en mémoire et actifs"""
-        active_thermals = {}
-        
-        # Nettoyer les thermiques expirés de la mémoire
-        expired_keys = []
-        for thermal_id, data in self.detected_thermals.items():
-            memory_age = current_time - data['detection_time']
-            if memory_age > self.memory_duration:
-                expired_keys.append(thermal_id)
-        
-        for key in expired_keys:
-            del self.detected_thermals[key]
-        
-        # Retourner les thermiques actifs
-        for thermal_id, data in self.detected_thermals.items():
-            if data['thermal'].is_active(current_time):
-                active_thermals[thermal_id] = data
-                
-        return active_thermals
-    
+    def remove_thermal(self, thermal_id: int):
+        """Retirer explicitement un thermique (callback /thermal_removed)."""
+        with self._lock:
+            self._entries.pop(thermal_id, None)
+
+    # ------------------------------------------------------------------
+    # Main-loop API (appelé depuis le thread asyncio)
+    # ------------------------------------------------------------------
+    def get_active_thermals(self) -> Dict[int, 'Thermal']:
+        """Retourne un snapshot thread-safe ``{tid: Thermal}`` (toutes)."""
+        with self._lock:
+            return {tid: e['thermal'] for tid, e in self._entries.items()}
+
+    def get_detected_thermals(self) -> Dict[int, 'Thermal']:
+        """Retourne uniquement les thermiques qu'un drone a physiquement
+        traversées (``detected=True``)."""
+        with self._lock:
+            return {tid: e['thermal'] for tid, e in self._entries.items()
+                    if e['detected']}
+
+    def get_info(self, thermal_id: int) -> Optional[dict]:
+        """
+        Retourne les métadonnées d'évaluation, ou None si la thermique est
+        absente.  Le dict retourné est une **copie** (pas de mutation
+        concurrente possible).
+        """
+        with self._lock:
+            entry = self._entries.get(thermal_id)
+            if entry is None:
+                return None
+            return {
+                'detected': entry['detected'],
+                'evaluated': entry['evaluated'],
+                'alt_gain': entry['alt_gain'],
+                'detection_time': entry['detection_time'],
+            }
+
+    def get_thermal_obj(self, thermal_id: int) -> Optional['Thermal']:
+        """Retourne l'objet Thermal ou None."""
+        with self._lock:
+            entry = self._entries.get(thermal_id)
+            return entry['thermal'] if entry else None
+
+    def mark_detected(self, thermal_id: int):
+        """Marquer une thermique comme physiquement détectée par un drone."""
+        with self._lock:
+            if thermal_id in self._entries:
+                self._entries[thermal_id]['detected'] = True
+
+    def mark_evaluated(self, thermal_id: int, evaluated: bool = True,
+                       alt_gain: float = 0.0):
+        """Mettre à jour le statut d'évaluation d'un thermique."""
+        with self._lock:
+            if thermal_id in self._entries:
+                self._entries[thermal_id]['evaluated'] = evaluated
+                self._entries[thermal_id]['alt_gain'] = alt_gain
+
+    def ensure_exists(self, thermal_id: int, thermal: 'Thermal', now: float):
+        """
+        S'assurer qu'un thermique est dans la carte (ajout si absent).
+        Utile en fallback si un thermique est détecté avant l'arrivée du
+        prochain snapshot ROS.
+        """
+        with self._lock:
+            if thermal_id not in self._entries:
+                self._entries[thermal_id] = {
+                    'thermal': thermal,
+                    'detection_time': now,
+                    'detected': True,
+                    'evaluated': False,
+                    'alt_gain': 0.0,
+                }
+            else:
+                # Si déjà présent (via snapshot ROS), marquer comme détecté
+                self._entries[thermal_id]['detected'] = True
+
+    def has_thermal(self, thermal_id: int) -> bool:
+        with self._lock:
+            return thermal_id in self._entries
+
+    def __len__(self):
+        with self._lock:
+            return len(self._entries)
+
+    # ------------------------------------------------------------------
+    # Rétro-compatibilité  (préférer get_info / get_active_thermals)
+    # ------------------------------------------------------------------
+    def add_thermal_detection(self, thermal_id: int, thermal: 'Thermal',
+                              detection_time: float):
+        """Ancienne API — redirige vers ensure_exists."""
+        self.ensure_exists(thermal_id, thermal, detection_time)
+
+    def change_thermal_status(self, thermal_id: int, evaluated: bool = False,
+                              alt_gain = 0.0):
+        """Ancienne API — redirige vers mark_evaluated."""
+        self.mark_evaluated(thermal_id, evaluated, alt_gain)
+
     def generate_evaluation_waypoints(self, current_pos: Dict, thermal_ids: int, drone_speed, bearing) -> Dict:
         """
         Génère des waypoints d'évaluation autour de la thermique détectée.
@@ -87,8 +197,8 @@ class ThermalMap:
         """
         waypoints = {'X': [], 'Y': [], 'Z': []}
 
-        if thermal_ids in self.detected_thermals:
-            thermal = self.detected_thermals[thermal_ids]['thermal']
+        thermal = self.get_thermal_obj(thermal_ids)
+        if thermal is not None:
             # Rayon adaptatif : 30% du rayon de la thermique pour rester dans la zone de forte portance
             # Minimum 30m, maximum 50m pour garantir une bonne évaluation
             evaluation_radius = max(30.0, min(50.0, thermal.radius * 0.3))
@@ -114,12 +224,6 @@ class ThermalMap:
             print(f"Évaluation commencée depuis bearing {np.degrees(bearing):.1f}° avec {len(waypoints['X'])} waypoints")
             
         return waypoints
-    
-    def change_thermal_status(self, thermal_id: int, evaluated: bool = False, alt_gain: bool = False):
-        """Change le statut d'un thermique détecté"""
-        if thermal_id in self.detected_thermals:
-            self.detected_thermals[thermal_id]['evaluated'] = evaluated
-            self.detected_thermals[thermal_id]['alt_gain'] = alt_gain
             
 
 class ThermalGenerator:
@@ -277,37 +381,6 @@ class ThermalEvaluator:
         if current_soar_wp_indices >= len(SOAR_WPs['X']) or not SOAR_WPs:
             exit_reason = "Waypoints de soaring terminés"
             print(f"Sortie du mode soaring: {exit_reason}")
-            return True
-
-        return False
-        # 1. Vérifier la hauteur maximale
-        if current_pos['Z'] >= self.params['Z_upper_bound']:
-            return True
-        
-        # 2. Vérifier la durée d'exploitation
-        soaring_duration = current_time - soaring_start_time
-        if soaring_duration >= self.max_soaring_time:
-            return True
-        
-        # 3. Vérifier si le thermique est encore actif
-        if not thermal.is_active(current_time):
-            return True
-        
-        # 4. Vérifier la proximité avec d'autres UAVs
-        for other_pos in other_uavs_positions:
-            # Calculer la distance verticale entre l'UAV actuel et les autres UAVs
-            distance = current_pos['Z'] - other_pos['Z']
-            if distance < self.min_separation_distance:
-                return True
-        
-        # 5. Vérifier si on est encore dans le thermique
-        distance_to_thermal_center = np.sqrt((current_pos['X'] - thermal.x)**2 + 
-                                           (current_pos['Y'] - thermal.y)**2)
-        if distance_to_thermal_center > thermal.radius:
-            return True
-
-        #6. vérifier si on a atteint la cible de soaring ou la liste de waypoints est vide
-        if current_soar_wp_indices >= len(SOAR_WPs['X']) or not SOAR_WPs:
             return True
 
         return False

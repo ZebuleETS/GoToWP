@@ -1195,6 +1195,7 @@ def CheckCollision(ptA, ptB, obstEdges):
 def get_destinations(startPos, endPos, obstacles):
     """
     Calcule un chemin entre deux points en évitant les obstacles polygonaux.
+    Utilise un graphe de visibilité + Dijkstra pour trouver le chemin le plus court.
     
     Args:
         startPos (dict): Point de départ {X, Y, Z}
@@ -1205,16 +1206,15 @@ def get_destinations(startPos, endPos, obstacles):
         list: Liste de points formant le chemin [{X, Y, Z}, ...]
     """
     import numpy as np
+    import heapq
     
     # Convertir les obstacles en format numpy array
     obstacle_arrays = []
     for obs in obstacles:
         if isinstance(obs, dict) and 'vertices' in obs:
-            # Convertir les vertices en numpy array si ce n'est pas déjà fait
             vertices = np.array(obs['vertices']) if not isinstance(obs['vertices'], np.ndarray) else obs['vertices']
             obstacle_arrays.append(vertices)
         elif isinstance(obs, np.ndarray):
-            # Si c'est déjà un array numpy (format direct)
             obstacle_arrays.append(obs)
     
     # Si pas d'obstacles, retourner une ligne droite
@@ -1222,13 +1222,14 @@ def get_destinations(startPos, endPos, obstacles):
         return [startPos, endPos]
     
     numObsts = len(obstacle_arrays)
-    allGraphPts = np.array([]).reshape(0,2)
-    obsEdges = np.array([]).reshape(0,4)
+    allGraphPts = np.array([]).reshape(0, 2)
+    obsEdges = np.array([]).reshape(0, 4)
     
     for i in range(numObsts):
         numOPts = obstacle_arrays[i].shape[0]
         allGraphPts = np.concatenate((allGraphPts, obstacle_arrays[i]), axis=0)
-        obsEdges = np.concatenate((obsEdges, np.concatenate((obstacle_arrays[i], obstacle_arrays[i][np.mod(np.arange(numOPts)+1,numOPts),:]), axis=1)), axis=0)
+        obsEdges = np.concatenate((obsEdges, np.concatenate(
+            (obstacle_arrays[i], obstacle_arrays[i][np.mod(np.arange(numOPts) + 1, numOPts), :]), axis=1)), axis=0)
 
     # Convertir startPos et endPos en format numpy array 2D
     startPosArray = np.array([[startPos['X'], startPos['Y']]])
@@ -1238,6 +1239,10 @@ def get_destinations(startPos, endPos, obstacles):
     allGraphPts = np.concatenate((allGraphPts, endPosArray), axis=0)
 
     n = allGraphPts.shape[0]
+    id_source = n - 2  # avant-dernier = start
+    id_target = n - 1  # dernier = end
+
+    # Construire la matrice d'adjacence (visibilité)
     A = np.ones((n, n)) - np.eye(n)
     ptCount = -1
     
@@ -1246,77 +1251,80 @@ def get_destinations(startPos, endPos, obstacles):
         X = np.arange(ptCount + 1, ptCount + numOPts + 1)
         for j in range(len(X)):
             A[X, X[j]] = 0
-        for k in range(numOPts-1):
+        for k in range(numOPts - 1):
             A[ptCount + 1 + k, ptCount + k + 2] = 1
             A[ptCount + k + 2, ptCount + 1 + k] = 1
-
         A[ptCount + 1, ptCount + numOPts] = 1
         A[ptCount + numOPts, ptCount + 1] = 1
-
         ptCount += numOPts
 
     for i in range(n):
-        for j in range(i,n):
-            inColl = CheckCollision(allGraphPts[i,:], allGraphPts[j,:], obsEdges)
+        for j in range(i, n):
+            inColl = CheckCollision(allGraphPts[i, :], allGraphPts[j, :], obsEdges)
             if inColl == 1:
                 A[i, j] = 0
                 A[j, i] = 0
 
-
-    id_source = n - 2
-    PATHs = dict()
-    boolean_list = [bool(x) for x in A[id_source,:].tolist()]
-    temp = np.array([]).reshape(0, 2)
-    for b in range(len(boolean_list)):
-        if boolean_list[b]:
-            temp = np.concatenate((temp, allGraphPts[b,:].reshape(1,2)), axis=0)
+    # --- Dijkstra sur le graphe de visibilité ---
+    dist = np.full(n, np.inf)
+    dist[id_source] = 0.0
+    prev = np.full(n, -1, dtype=int)
+    visited = np.zeros(n, dtype=bool)
     
-    for i in range(temp.shape[0]):
-        PATHs[str(i)] = np.vstack((startPosArray[0,:], temp[i,:]))
-        if all(temp[i,:] == endPosArray[0,:]):
-            flag = False
+    # File de priorité : (distance, node_id)
+    heap = [(0.0, id_source)]
+    
+    while heap:
+        d, u = heapq.heappop(heap)
+        if visited[u]:
+            continue
+        visited[u] = True
+        if u == id_target:
             break
-        else:
-            flag = True
-
-    nPATHs = len(PATHs)
-    while flag:
-        P = dict()
-        nP = 0
-        for i in range(len(PATHs)):
-            if flag:
-                AA = A[np.all(allGraphPts == PATHs[str(i)][-1, :], axis=1).tolist()]
-                for ii in range(AA.shape[0]):
-                    boolean_list = [bool(x) for x in AA[ii, :].tolist()]
-                    temp = np.array([]).reshape(0, 2)
-                    for b in range(len(boolean_list)):
-                        if boolean_list[b]:
-                            temp = np.concatenate((temp, allGraphPts[b, :].reshape(1, 2)), axis=0)
-                    temp2 = dict()
-                    for j in range(temp.shape[0]):
-                        temp2[str(j)] = np.vstack((PATHs[str(i)], temp[j, :]))
-                        if all(temp[j, :] == endPosArray[0, :]):
-                            flag = False
-                            break
-
-                    for jj in range(len(temp2)):
-                        P[str(nP+jj)] = temp2[str(jj)]
-                    nP = len(P)
-
-        for k in range(len(P)):
-            PATHs[str(nPATHs+k)] = P[str(k)]
-        nPATHs = len(PATHs)
-
-
-    # Convertir le résultat en liste de dictionnaires
-    final_path = PATHs[str(len(PATHs)-1)]
+        for v in range(n):
+            if A[u, v] > 0 and not visited[v]:
+                edge_len = np.linalg.norm(allGraphPts[u] - allGraphPts[v])
+                new_dist = d + edge_len
+                if new_dist < dist[v]:
+                    dist[v] = new_dist
+                    prev[v] = u
+                    heapq.heappush(heap, (new_dist, v))
+    
+    # Reconstituer le chemin
+    if dist[id_target] == np.inf:
+        # Pas de chemin trouvé → ligne droite (fallback)
+        return [startPos, endPos]
+    
+    path_indices = []
+    node = id_target
+    while node != -1:
+        path_indices.append(node)
+        node = prev[node]
+    path_indices.reverse()
+    
+    # Interpoler l'altitude linéairement le long du chemin
+    total_len = 0.0
+    seg_lengths = []
+    for k in range(1, len(path_indices)):
+        sl = np.linalg.norm(allGraphPts[path_indices[k]] - allGraphPts[path_indices[k - 1]])
+        seg_lengths.append(sl)
+        total_len += sl
+    
     result = []
-    for point in final_path:
+    cumulative = 0.0
+    for k, idx in enumerate(path_indices):
+        if total_len > 0:
+            frac = cumulative / total_len
+        else:
+            frac = 0.0
+        z = startPos['Z'] + frac * (endPos['Z'] - startPos['Z'])
         result.append({
-            'X': float(point[0]),
-            'Y': float(point[1]),
-            'Z': startPos['Z']  # Utiliser l'altitude du point de départ
+            'X': float(allGraphPts[idx, 0]),
+            'Y': float(allGraphPts[idx, 1]),
+            'Z': float(z),
         })
+        if k < len(seg_lengths):
+            cumulative += seg_lengths[k]
     
     return result
 
