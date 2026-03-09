@@ -1040,6 +1040,10 @@ def optimal_radius(thermal, UAV_data, flight_conditions):
             # Calculer le rayon de virage pour cette vitesse et cet angle
             radius = turn_radius(airspeed, bank_angle_rad)
             
+            # PX4 do_orbit nécessite un rayon minimum pour orbiter proprement
+            if radius < 25.0:
+                continue
+            
             # Mettre à jour les conditions de vol pour le calcul du sink rate
             test_conditions['airspeed'] = airspeed
             test_conditions['bank_angle'] = bank_angle_rad  # En radians

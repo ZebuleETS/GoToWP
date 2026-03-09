@@ -153,6 +153,7 @@ class PX4SITLBridge:
         self.orbit_altitude_history = []  # Historique d'altitude pendant l'orbite
         self.orbit_start_time = None
         self.altitude_monitor_task = None
+        self.orbit_target_altitude_amsl = None  # Altitude AMSL cible (mise à jour pendant soaring)
     
     async def connect(self):
         """Connexion à l'instance PX4 SITL"""
@@ -245,10 +246,11 @@ class PX4SITLBridge:
                     print(f"[UAV {self.uav_id}] ✗ Échec armement après {max_retries} tentatives: {e}")
                     raise
         
-        print(f"[UAV {self.uav_id}] Décollage...")
+        target_alt = self.params['working_floor']
+        await self.drone.action.set_takeoff_altitude(target_alt)
+        print(f"[UAV {self.uav_id}] Décollage vers {target_alt:.0f}m...")
         await self.drone.action.takeoff()
         
-        target_alt = self.params['working_floor']
         async for position in self.drone.telemetry.position():
             current_alt = position.relative_altitude_m
             print(f"[UAV {self.uav_id}] Altitude actuelle: {current_alt:.1f}m / {target_alt:.1f}m", end='\r')
@@ -768,6 +770,7 @@ class PX4SITLBridge:
         self.orbit_radius = abs(radius_m)
         self.orbit_altitude_history = []
         self.orbit_start_time = time.time()
+        self.orbit_target_altitude_amsl = alt_center
         
         # Lancer l'orbite avec do_orbit
         # Yaw: face au centre pendant l'évaluation, tangentiel pendant le soaring
@@ -1026,6 +1029,7 @@ class PX4SITLBridge:
         
         self.orbit_mode = 'soaring'
         self.orbit_radius = optimal_radius
+        self.orbit_target_altitude_amsl = current_abs_altitude
         
         # Relancer l'orbite avec les paramètres optimaux
         # Convertir en float natif Python pour gRPC/protobuf
@@ -1043,6 +1047,80 @@ class PX4SITLBridge:
         except Exception as e:
             print(f"[UAV {self.uav_id}] ✗ Erreur transition soaring: {e}")
             return False
+
+    async def update_soaring_altitude(self, time_step, z_upper_bound=1000.0):
+        """
+        Met à jour l'altitude de l'orbite soaring progressivement
+        pour simuler la montée dans le thermique.
+        PX4 do_orbit maintient l'altitude → on doit la ré-émettre périodiquement.
+        
+        Args:
+            time_step (float): Pas de temps simulation (secondes)
+            z_upper_bound (float): Altitude max ENU (m)
+        """
+        if not self.is_orbiting or self.orbit_mode != 'soaring':
+            return
+        if self.orbit_thermal_obj is None or self.orbit_radius is None:
+            return
+        if self.orbit_target_altitude_amsl is None:
+            return
+        
+        thermal = self.orbit_thermal_obj
+        orbit_radius = self.orbit_radius
+        orbit_speed = self.orbit_speed or self.UAV_data.get('min_airspeed', 8.0)
+        
+        # Portance du thermique au rayon d'orbite
+        lift_rate = thermal.get_lift_rate(orbit_radius)
+        
+        # Conditions atmosphériques et taux de chute
+        working_floor = self.params.get('working_floor', 600.0)
+        atm = _compute_atmosphere(working_floor)
+        grav = atm['grav']
+        air_density = atm['air_density']
+        
+        bank_angle = np.arctan2(orbit_speed**2, grav * orbit_radius)
+        flight_cond = {
+            'airspeed': orbit_speed,
+            'weight': 0.0,
+            'flight_path_angle': 0.0,
+            'grav_accel': grav,
+            'bank_angle': bank_angle,
+            'airspeed_dot': 0.0,
+            'air_density': air_density
+        }
+        sink_rate = abs(get_sink_rate(self.UAV_data, flight_cond))
+        
+        net_climb = lift_rate - sink_rate
+        if net_climb <= 0:
+            return
+        
+        # Vérifier altitude max (convertir z_upper_bound ENU → approximation AMSL)
+        sim_origin_alt = self.simulation_origin['alt'] if self.simulation_origin else 0.0
+        max_altitude_amsl = sim_origin_alt + z_upper_bound
+        if self.orbit_target_altitude_amsl >= max_altitude_amsl:
+            return
+        
+        # Incrémenter l'altitude cible
+        altitude_gain = net_climb * time_step
+        new_altitude = min(self.orbit_target_altitude_amsl + altitude_gain, max_altitude_amsl)
+        self.orbit_target_altitude_amsl = new_altitude
+        
+        # Ré-émettre do_orbit avec la nouvelle altitude
+        lat_center, lon_center, _ = self._enu_to_geodetic(
+            self.orbit_center_enu['X'], self.orbit_center_enu['Y'], self.orbit_center_enu['Z']
+        )
+        
+        try:
+            await self.drone.action.do_orbit(
+                float(-self.orbit_radius),
+                float(orbit_speed),
+                OrbitYawBehavior.HOLD_FRONT_TANGENT_TO_CIRCLE,
+                float(lat_center),
+                float(lon_center),
+                float(new_altitude)
+            )
+        except Exception as e:
+            print(f"[UAV {self.uav_id}] Erreur mise à jour altitude soaring: {e}")
 
     async def stop_orbit_loiter(self):
         """
@@ -1077,6 +1155,7 @@ class PX4SITLBridge:
         self.orbit_center_enu = None
         self.orbit_radius = None
         self.orbit_altitude_history = []
+        self.orbit_target_altitude_amsl = None
         
         # Mettre à jour last_position_ned avec la position réelle actuelle
         # pour éviter un saut brusque quand offboard reprend
@@ -1692,6 +1771,12 @@ class MultiUAVController:
         FLT_conditions[uav_id]['flight_path_angle'] = np.arcsin(
             max(-1.0, min(1.0, alt_var['avg_climb_rate'] / max(FLT_conditions[uav_id]['airspeed'], 1.0)))
         )
+        
+        # Pendant le soaring, mettre à jour progressivement l'altitude d'orbite
+        # pour permettre au drone de monter dans le thermique
+        if bridge.orbit_mode == 'soaring':
+            z_upper = self.params.get('Z_upper_bound', 1000.0)
+            await bridge.update_soaring_altitude(self.params['time_step'], z_upper)
         
         return pos_enu
 
