@@ -128,6 +128,9 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
         print(f"UAV {Uidx}: Tous les waypoints atteints ({current_wp_idx}/{len(GOAL_WPs['X'])})")
         # Retourner sans modification - l'UAV a terminé sa mission
         return FLT_track, FLT_conditions, current_wp_idx
+
+    if 'collisions_avoided_count' not in FLT_track[Uidx]:
+        FLT_track[Uidx]['collisions_avoided_count'] = 0
     
     # Definition
     VO_flag = list()
@@ -370,48 +373,6 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
                 PB_temp['X'].append(x_pred_level)
                 PB_temp['Y'].append(y_pred_level)
                 PB_temp['Z'].append(FLT_data[Uidx]['Z'])
-                
-                ## 3. DESCENTE CONTRÔLÉE AVEC MOTEUR
-                #FLT_conditions[Uidx]['flight_path_angle'] = descent_angle
-                #
-                ## Calculer la distance parcourue et le changement d'altitude (utiliser constantes pré-calculées)
-                #horizontal_distance = V[j] * t_step * cos_descent
-                #altitude_change = V[j] * t_step * sin_descent  # Négatif car descente
-                #
-                ## Calculer la consommation d'énergie pour la descente contrôlée
-                #pwr_descent = get_power_consumption(UAV_data, FLT_conditions[Uidx])
-                #power_consumption_descent = pwr_descent * (t_step / 3600)
-                #
-                ## Calculer la nouvelle position (réutiliser REF)
-                #x_new_descent, y_new_descent = get_destination_from_range_and_bearing_cartesian(REF, horizontal_distance, H[i])
-                #
-                ## Validation
-                #if np.isnan(x_new_descent) or np.isnan(y_new_descent):
-                #    print(f"UAV {Uidx} ENGINE-DESCENT: NaN position - dist={horizontal_distance:.2f}, H[{i}]={H[i]:.3f}")
-                #    continue
-                #
-                #alt_descent = min(max(FLT_data[Uidx]['Z'] + altitude_change, LBz), UBz)
-                #
-                #if np.isnan(alt_descent):
-                #    print(f"UAV {Uidx} ENGINE-DESCENT: NaN altitude - Z={FLT_data[Uidx]['Z']:.1f}, change={altitude_change:.2f}")
-                #    continue
-                #
-                ## Ajouter le candidat pour la descente
-                #candidate_sol['X'].append(x_new_descent)
-                #candidate_sol['Y'].append(y_new_descent)
-                #candidate_sol['Z'].append(alt_descent)
-                #candidate_sol['bearing'].append(H[i])
-                #candidate_sol['battery_capacity'].append(FLT_data[Uidx]['battery_capacity'] - power_consumption_descent)
-                #candidate_sol['flight_mode'].append('engine')
-                #candidate_sol['airspeed'].append(V[j])
-                #candidate_sol['flight_path_angle'].append(descent_angle)
-                #
-                ## Prédiction pour collision (réutiliser delta_z_down)
-                #pridction_distance = (delta_z_down / abs(altitude_change)) * horizontal_distance if abs(altitude_change) > 1e-6 else V[j] * t_step
-                #x_pred_descent, y_pred_descent = get_destination_from_range_and_bearing_cartesian(REF, pridction_distance, H[i])
-                #PB_temp['X'].append(x_pred_descent)
-                #PB_temp['Y'].append(y_pred_descent)
-                #PB_temp['Z'].append(LBz)
 
 
     # Check for obstacles and compute safety constraints
@@ -564,6 +525,12 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
         PO_flag.append(flag2)
         OB_flag.append(flag3)
 
+    # M8b: un événement d'évitement est compté si au moins un candidat a été
+    # rejeté pour risque inter-agent mais que le candidat choisi est sûr.
+    safety_rejected_candidates = sum(
+        1 for i in range(len(VO_flag)) if not (VO_flag[i] and PO_flag[i])
+    )
+
     # Vérifier qu'il y a des candidats valides
     if len(candidate_sol['X']) == 0:
         print(f"❌ UAV {Uidx}: Aucun candidat valide généré!")
@@ -615,6 +582,8 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
         DM = np.column_stack([C_safety, C_distance, alpha*C_energy, C_sink, C_obstacle])
     ranked_indices = decision_making(DM)
     idx = ranked_indices[0]  # Meilleur candidat selon le classement
+    if safety_rejected_candidates > 0 and VO_flag[idx] and PO_flag[idx]:
+        FLT_track[Uidx]['collisions_avoided_count'] += 1
     
     # VALIDATION FINALE : Vérifier que la solution choisie est valide
     final_x = candidate_sol['X'][idx]
@@ -698,6 +667,13 @@ def process_single_uav(Uidx, FLT_track, FLT_conditions, GOAL_WPs, nUAVs, params,
             return result
         
         if FLT_track[Uidx]['flight_mode'][-1] == 'soaring':
+            result['wp_idx'] = current_wp_indices[Uidx]
+            result['track'] = FLT_track[Uidx]
+            result['conditions'] = FLT_conditions[Uidx]
+            return result
+        
+        # Si le drone est en atterrissage / atterri, ne pas traiter
+        if FLT_track[Uidx]['flight_mode'][-1] == 'landing':
             result['wp_idx'] = current_wp_indices[Uidx]
             result['track'] = FLT_track[Uidx]
             result['conditions'] = FLT_conditions[Uidx]

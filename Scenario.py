@@ -8,6 +8,9 @@ from enum import Enum
 from dataclasses import dataclass, field
 from typing import List, Dict, Tuple
 import json
+import csv
+import os
+from collections import Counter
 
 from trajectory import generate_random_obstacles
 
@@ -49,6 +52,26 @@ class PerformanceMetrics:
     thermals_exploited: int = 0
     thermals_rejected: int = 0
     thermals_per_uav: Dict[int, int] = field(default_factory=dict)
+    
+    # Métriques d'endurance (patrouille)
+    patrol_loops: Dict[int, int] = field(default_factory=dict)
+    soaring_ratio: Dict[int, float] = field(default_factory=dict)  # soar_time / total_time
+
+    # Métriques complémentaires (M1..M7)
+    motor_off_ratio: Dict[int, float] = field(default_factory=dict)  # (glide+soar)/total en %
+    battery_consumption_rate_ah_per_h: Dict[int, float] = field(default_factory=dict)
+    potential_energy_j: Dict[int, Dict[str, float]] = field(default_factory=dict)
+    thermals_detected_per_uav: Dict[int, int] = field(default_factory=dict)
+    exploited_detected_ratio: Dict[int, float] = field(default_factory=dict)
+    thermal_exploitation_frequency: Dict[int, int] = field(default_factory=dict)
+    thermal_exploitation_duration_s: Dict[int, float] = field(default_factory=dict)
+    thermal_exploitation_duration_per_uav_s: Dict[int, Dict[int, float]] = field(default_factory=dict)
+    thermal_exploited_unique: int = 0
+    thermal_exploitation_global_ratio: float = 0.0  # eta_exp,global = N_exp / N_total en %
+
+    # Métriques sécurité/performance calcul (M8..M11)
+    algorithm_time_avg_ms: float = 0.0
+    algorithm_time_max_ms: float = 0.0
     
     # Métriques de couverture
     objects_total: int = 0
@@ -92,9 +115,10 @@ class ScenarioGenerator:
         print("GÉNÉRATION SCÉNARIO: Collision Préliminaire (100% risque)")
         print("="*70)
         
-        # Destination commune au centre
-        target_x = (params['X_upper_bound'] + params['X_lower_bound']) / 2
-        target_y = (params['Y_upper_bound'] + params['Y_lower_bound']) / 2
+        # Destination commune éloignée du home (0,0)
+        # Le home est au centre de la zone → décaler la cible vers le quadrant positif
+        target_x = params['X_upper_bound'] * 0.65
+        target_y = params['Y_upper_bound'] * 0.65
         target_z = 400.0
         
         num_vertices = np.random.randint(4, 6)  # Nombre de sommets pour le polygone
@@ -146,9 +170,9 @@ class ScenarioGenerator:
             'y_max': params['Y_upper_bound'] - 500
         }
         
-        # Destination commune
-        target_x = (test_zone['x_max'] + test_zone['x_min']) / 2
-        target_y = (test_zone['y_max'] + test_zone['y_min']) / 2
+        # Destination commune éloignée du home (0,0)
+        target_x = params['X_upper_bound'] * 0.65
+        target_y = params['Y_upper_bound'] * 0.65
         target_z = 400.0
         
         # Générer obstacles variables (plus pour scénario 2)
@@ -315,14 +339,11 @@ class PerformanceAnalyzer:
     def analyze_thermal_exploitation(thermals: list, FLT_track: dict, nUAVs: int) -> dict:
         """Analyser l'exploitation des thermiques"""
         detected = 0
-        exploited = 0
         rejected = 0
         for t in thermals:
             if isinstance(t, dict):
                 if t.get('detected', False):
                     detected += 1
-                if t.get('exploited', False):
-                    exploited += 1
                 if t.get('rejected', False):
                     rejected += 1
             else:
@@ -343,13 +364,64 @@ class PerformanceAnalyzer:
                     if tid is not None and tid in FLT_track.get(u, {}).get('visited_thermals', set()):
                         count += 1
             thermals_per_uav[u] = count
-            exploited += count
+
+        exploited = sum(thermals_per_uav.values())
         
         return {
             'detected': detected,
             'exploited': exploited,
             'rejected': rejected,
             'per_uav': thermals_per_uav
+        }
+
+    @staticmethod
+    def calculate_potential_energy_variation(FLT_track: dict, nUAVs: int,
+                                            uav_mass: float = 1.6,
+                                            g: float = 9.81) -> Dict[int, Dict[str, float]]:
+        """Retourne le gain d'énergie potentielle net et brut (Joules) par UAV."""
+        energy = {}
+        for u in range(nUAVs):
+            z = FLT_track[u].get('Z', [])
+            if len(z) < 2:
+                energy[u] = {'net_J': 0.0, 'gross_J': 0.0}
+                continue
+            delta_z = z[-1] - z[0]
+            max_z_gain = max(z) - z[0]
+            energy[u] = {
+                'net_J': uav_mass * g * delta_z,
+                'gross_J': uav_mass * g * max_z_gain,
+            }
+        return energy
+
+    @staticmethod
+    def calculate_thermal_exploitation_log_metrics(FLT_track: dict, nUAVs: int) -> dict:
+        """Calcule fréquence et durées d'exploitation par thermique depuis les logs UAV."""
+        frequency = Counter()
+        duration_per_thermal = Counter()
+        duration_per_uav = {u: {} for u in range(nUAVs)}
+        total_exploitations = 0
+
+        for u in range(nUAVs):
+            entries = FLT_track[u].get('thermal_exploitation_log', [])
+            for entry in entries:
+                tid = entry.get('thermal_id')
+                if tid is None:
+                    continue
+                frequency[tid] += 1
+                total_exploitations += 1
+                start_t = entry.get('entry_time')
+                exit_t = entry.get('exit_time')
+                if start_t is None or exit_t is None:
+                    continue
+                duration = max(0.0, exit_t - start_t)
+                duration_per_thermal[tid] += duration
+                duration_per_uav[u][tid] = duration_per_uav[u].get(tid, 0.0) + duration
+
+        return {
+            'frequency': dict(frequency),
+            'duration_per_thermal_s': dict(duration_per_thermal),
+            'duration_per_uav_s': duration_per_uav,
+            'total_exploitations': total_exploitations,
         }
     
     @staticmethod
@@ -407,10 +479,11 @@ class PerformanceAnalyzer:
             for u in range(metrics.num_uavs):
                 print(f"UAV {u}:")
                 print(f"  Distance totale: {metrics.total_distance.get(u, 0):.1f}m")
+                print(f"  M9 L_path: {metrics.total_distance.get(u, 0):.1f}m")
                 print(f"  Batterie résiduelle: {metrics.battery_remaining.get(u, 0):.2f}")
                 print(f"  Batterie consommée: {metrics.battery_consumed.get(u, 0):.2f}")
-            print(f"\nDistance min séparation: {metrics.min_separation_distance:.1f}m")
-            print(f"Collisions évitées: {metrics.collisions_avoided}")
+            print(f"\nM8a Distance min séparation d_min: {metrics.min_separation_distance:.1f}m")
+            print(f"M8b Collisions inter-agents évitées N_coll: {metrics.collisions_avoided}")
         
         # Métriques de temps
         if metrics.total_flight_time:
@@ -427,6 +500,13 @@ class PerformanceAnalyzer:
                     print(f"  Glide: {glide:.1f}s ({glide/total*100:.1f}%)")
                     print(f"  Soar: {soar:.1f}s ({soar/total*100:.1f}%)")
                     print(f"  Engine: {engine:.1f}s ({engine/total*100:.1f}%)")
+                    motor_off = metrics.motor_off_ratio.get(u, (glide + soar) / total * 100)
+                    rate = metrics.battery_consumption_rate_ah_per_h.get(u, 0.0)
+                    print(f"  M1 Ratio moteur OFF: {motor_off:.1f}%")
+                    print(f"  M2 Taux conso batterie: {rate:.3f} Ah/h")
+                pe = metrics.potential_energy_j.get(u, {'net_J': 0.0, 'gross_J': 0.0})
+                print(f"  M3 Énergie potentielle nette: {pe.get('net_J', 0.0):.1f} J")
+                print(f"  M3 Énergie potentielle brute: {pe.get('gross_J', 0.0):.1f} J")
         
         # Métriques thermiques
         if metrics.thermals_generated > 0:
@@ -434,31 +514,68 @@ class PerformanceAnalyzer:
             print(f"Générées: {metrics.thermals_generated}")
             print(f"Détectées: {metrics.thermals_detected} ({metrics.thermals_detected/metrics.thermals_generated*100:.1f}%)")
             print(f"Exploitées: {metrics.thermals_exploited} ({metrics.thermals_exploited/metrics.thermals_generated*100:.1f}%)")
+            print(f"M5+ Exploitées uniques: {metrics.thermal_exploited_unique}")
+            print(f"M5+ eta_exp,global: {metrics.thermal_exploitation_global_ratio:.1f}%")
             print(f"Rejetées: {metrics.thermals_rejected}")
             
             if metrics.thermals_per_uav:
                 print("\nPar UAV:")
                 for u, count in metrics.thermals_per_uav.items():
-                    print(f"  UAV {u}: {count} thermiques exploitées")
+                    detected_u = metrics.thermals_detected_per_uav.get(u, 0)
+                    ratio_u = metrics.exploited_detected_ratio.get(u, 0.0)
+                    print(f"  UAV {u}: {count} thermiques exploitées | détectées: {detected_u} | M5 exploitées/détectées: {ratio_u:.1f}%")
+
+            if metrics.thermal_exploitation_frequency:
+                print("\nM6 Fréquence d'exploitation par thermique:")
+                for tid in sorted(metrics.thermal_exploitation_frequency):
+                    print(f"  Thermique {tid}: {metrics.thermal_exploitation_frequency[tid]} entrées")
+
+            if metrics.thermal_exploitation_duration_s:
+                print("\nM7 Durée d'exploitation par thermique:")
+                for tid in sorted(metrics.thermal_exploitation_duration_s):
+                    dur = metrics.thermal_exploitation_duration_s[tid]
+                    print(f"  Thermique {tid}: {dur:.1f}s")
+        
+        # Métriques d'endurance
+        if metrics.patrol_loops:
+            print("\n--- ENDURANCE ---")
+            for u in range(metrics.num_uavs):
+                loops = metrics.patrol_loops.get(u, 0)
+                ratio = metrics.soaring_ratio.get(u, 0.0)
+                total = metrics.total_flight_time.get(u, 0)
+                glide = metrics.glide_time.get(u, 0)
+                soar = metrics.soar_time.get(u, 0)
+                engine = metrics.engine_time.get(u, 0)
+                bat = metrics.battery_remaining.get(u, 0)
+                print(f"UAV {u}:")
+                print(f"  Boucles de patrouille: {loops}")
+                print(f"  Temps de vol total: {total:.0f}s ({total/60:.1f}min)")
+                print(f"  Ratio soaring: {ratio*100:.1f}%")
+                print(f"  Répartition: glide {glide:.0f}s | soar {soar:.0f}s | engine {engine:.0f}s")
+                print(f"  Batterie restante: {bat:.2f}")
         
         # Métriques de couverture
         if metrics.objects_total > 0:
             print("\n--- COUVERTURE ---")
             print(f"Objets totaux: {metrics.objects_total}")
             print(f"Objets détectés: {metrics.objects_detected} ({metrics.detection_rate*100:.1f}%)")
+            print(f"M10 eta_cov: {metrics.detection_rate*100:.1f}%")
             
             if metrics.objects_per_uav:
                 print("\nPar UAV:")
                 for u, count in metrics.objects_per_uav.items():
                     print(f"  UAV {u}: {count} objets détectés")
+
+        if metrics.algorithm_time_avg_ms > 0:
+            print("\n--- CALCUL ---")
+            print(f"M11 T_algo moyen: {metrics.algorithm_time_avg_ms:.1f}ms")
+            print(f"M11 T_algo max: {metrics.algorithm_time_max_ms:.1f}ms")
         
         print("\n" + "="*70)
     
     @staticmethod
     def save_metrics_to_file(metrics: PerformanceMetrics, filename: str):
         """Sauvegarder les métriques dans un fichier JSON"""
-        import os
-        
         # Créer le dossier multi_uav_logs s'il n'existe pas
         log_dir = '/home/pix4/GoToWP/multi_uav_logs'
         os.makedirs(log_dir, exist_ok=True)
@@ -479,20 +596,90 @@ class PerformanceAnalyzer:
             'glide_time': metrics.glide_time,
             'soar_time': metrics.soar_time,
             'engine_time': metrics.engine_time,
+            'motor_off_ratio': metrics.motor_off_ratio,
+            'battery_consumption_rate_ah_per_h': metrics.battery_consumption_rate_ah_per_h,
+            'potential_energy_j': metrics.potential_energy_j,
             'thermals_generated': metrics.thermals_generated,
             'thermals_detected': metrics.thermals_detected,
             'thermals_exploited': metrics.thermals_exploited,
             'thermals_rejected': metrics.thermals_rejected,
             'thermals_per_uav': metrics.thermals_per_uav,
+            'thermals_detected_per_uav': metrics.thermals_detected_per_uav,
+            'exploited_detected_ratio': metrics.exploited_detected_ratio,
+            'thermal_exploitation_frequency': metrics.thermal_exploitation_frequency,
+            'thermal_exploitation_duration_s': metrics.thermal_exploitation_duration_s,
+            'thermal_exploitation_duration_per_uav_s': metrics.thermal_exploitation_duration_per_uav_s,
+            'thermal_exploited_unique': metrics.thermal_exploited_unique,
+            'thermal_exploitation_global_ratio': metrics.thermal_exploitation_global_ratio,
+            'algorithm_time_avg_ms': metrics.algorithm_time_avg_ms,
+            'algorithm_time_max_ms': metrics.algorithm_time_max_ms,
             'objects_total': metrics.objects_total,
             'objects_detected': metrics.objects_detected,
             'objects_per_uav': metrics.objects_per_uav,
-            'detection_rate': metrics.detection_rate
+            'detection_rate': metrics.detection_rate,
+            'patrol_loops': metrics.patrol_loops,
+            'soaring_ratio': metrics.soaring_ratio
         }
         
         with open(filepath, 'w') as f:
             json.dump(data, f, indent=4)
         print(f"\n✓ Métriques sauvegardées dans {filepath}")
+
+    @staticmethod
+    def save_metrics_to_csv(metrics: PerformanceMetrics, filename: str):
+        """Sauvegarder les métriques dans un CSV plat dans le dossier log."""
+        log_dir = '/home/pix4/GoToWP/log'
+        os.makedirs(log_dir, exist_ok=True)
+        filepath = os.path.join(log_dir, filename)
+
+        fieldnames = [
+            'scenario_name', 'num_uavs', 'uav_id', 'total_distance_m', 'path_length_points',
+            'flight_time_s', 'glide_time_s', 'soar_time_s', 'engine_time_s',
+            'motor_off_ratio_pct', 'battery_consumed_ah', 'battery_remaining_ah',
+            'battery_rate_ah_per_h', 'potential_energy_net_j', 'potential_energy_gross_j',
+            'thermals_detected_uav', 'thermals_exploited_uav', 'exploited_detected_ratio_pct',
+            'patrol_loops', 'soaring_ratio_pct',
+            'd_min_m', 'n_coll', 'eta_cov_pct', 't_algo_avg_ms', 't_algo_max_ms',
+            'eta_exp_global_pct', 'n_exp_unique', 'n_total_thermals'
+        ]
+
+        with open(filepath, 'w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            for u in range(metrics.num_uavs):
+                pe = metrics.potential_energy_j.get(u, {'net_J': 0.0, 'gross_J': 0.0})
+                writer.writerow({
+                    'scenario_name': metrics.scenario_name,
+                    'num_uavs': metrics.num_uavs,
+                    'uav_id': u,
+                    'total_distance_m': metrics.total_distance.get(u, 0.0),
+                    'path_length_points': metrics.path_length.get(u, 0),
+                    'flight_time_s': metrics.total_flight_time.get(u, 0.0),
+                    'glide_time_s': metrics.glide_time.get(u, 0.0),
+                    'soar_time_s': metrics.soar_time.get(u, 0.0),
+                    'engine_time_s': metrics.engine_time.get(u, 0.0),
+                    'motor_off_ratio_pct': metrics.motor_off_ratio.get(u, 0.0),
+                    'battery_consumed_ah': metrics.battery_consumed.get(u, 0.0),
+                    'battery_remaining_ah': metrics.battery_remaining.get(u, 0.0),
+                    'battery_rate_ah_per_h': metrics.battery_consumption_rate_ah_per_h.get(u, 0.0),
+                    'potential_energy_net_j': pe.get('net_J', 0.0),
+                    'potential_energy_gross_j': pe.get('gross_J', 0.0),
+                    'thermals_detected_uav': metrics.thermals_detected_per_uav.get(u, 0),
+                    'thermals_exploited_uav': metrics.thermals_per_uav.get(u, 0),
+                    'exploited_detected_ratio_pct': metrics.exploited_detected_ratio.get(u, 0.0),
+                    'patrol_loops': metrics.patrol_loops.get(u, 0),
+                    'soaring_ratio_pct': metrics.soaring_ratio.get(u, 0.0) * 100.0,
+                    'd_min_m': metrics.min_separation_distance,
+                    'n_coll': metrics.collisions_avoided,
+                    'eta_cov_pct': metrics.detection_rate * 100.0,
+                    't_algo_avg_ms': metrics.algorithm_time_avg_ms,
+                    't_algo_max_ms': metrics.algorithm_time_max_ms,
+                    'eta_exp_global_pct': metrics.thermal_exploitation_global_ratio,
+                    'n_exp_unique': metrics.thermal_exploited_unique,
+                    'n_total_thermals': metrics.thermals_generated,
+                })
+
+        print(f"\n✓ Métriques CSV sauvegardées dans {filepath}")
 
 
 def select_scenario() -> TestScenario:
@@ -504,7 +691,7 @@ def select_scenario() -> TestScenario:
     print("0 - Préliminaire: Test de collision (100% risque)")
     print("1 - Trajectoire optimale (Propulsé)")
     print("2 - Trajectoire optimale (Planeur)")
-    print("3 - Test d'endurance")
+    print("3 - Test d'endurance (patrouille + thermiques)")
     print("4 - Test de couverture")
     
     choice = int(input("\nChoisir un scénario (0-4): ") or "0")
