@@ -2358,7 +2358,7 @@ async def run_multi_uav_simulation():
         if scenario == TestScenario.ENDURANCE:
             max_iterations = 5000   # ~73 min : test d'endurance long
         elif scenario == TestScenario.COVERAGE:
-            max_iterations = 3000   # ~55 min
+            max_iterations = 5000   # ~73 min : couverture longue
         else:
             max_iterations = 2000   # ~37 min
         
