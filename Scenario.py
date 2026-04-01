@@ -133,8 +133,6 @@ class ScenarioGenerator:
             'vertices': vertices,
         }
         print(f"✓ Obstacle central généré avec {num_vertices} sommets et rayon ~{radius:.0f}m")
-        print( center_obstacle['vertices'])
-        print(type(center_obstacle["vertices"]))
         
         obstacles = [center_obstacle]
         
@@ -281,7 +279,7 @@ class PerformanceAnalyzer:
                     
                     if mode == 'glide':
                         glide_time += time_step
-                    elif mode == 'soar':
+                    elif mode == 'soaring':
                         soar_time += time_step
                     elif mode == 'engine':
                         engine_time += time_step
@@ -378,18 +376,59 @@ class PerformanceAnalyzer:
     def calculate_potential_energy_variation(FLT_track: dict, nUAVs: int,
                                             uav_mass: float = 1.6,
                                             g: float = 9.81) -> Dict[int, Dict[str, float]]:
-        """Retourne le gain d'énergie potentielle net et brut (Joules) par UAV."""
+        """Retourne les métriques d'énergie potentielle (Joules) par UAV.
+
+        - thermal_gain_J: somme des gains d'altitude en vol non-moteur
+        - engine_gain_J: somme des gains d'altitude en mode moteur
+        - gain_J: somme des gains d'altitude sur tout le vol (dz > 0)
+        - loss_J: somme des pertes d'altitude sur tout le vol (|dz| pour dz < 0)
+        - variation_J: variation nette entre début et fin du vol
+        """
         energy = {}
         for u in range(nUAVs):
             z = FLT_track[u].get('Z', [])
+            modes = FLT_track[u].get('flight_mode', [])
             if len(z) < 2:
-                energy[u] = {'net_J': 0.0, 'gross_J': 0.0}
+                energy[u] = {
+                    'variation_J': 0.0,
+                    'thermal_gain_J': 0.0,
+                    'engine_gain_J': 0.0,
+                    'gain_J': 0.0,
+                    'loss_J': 0.0,
+                }
                 continue
-            delta_z = z[-1] - z[0]
-            max_z_gain = max(z) - z[0]
+
+            gain_alt = 0.0
+            loss_alt = 0.0
+            thermal_gain_alt = 0.0
+            engine_gain_alt = 0.0
+            for i in range(1, len(z)):
+                dz = z[i] - z[i - 1]
+                if dz > 0.0:
+                    gain_alt += dz
+                    # Attribution par source:
+                    # - engine -> gain moteur
+                    # - tout autre mode (soaring/glide) -> gain thermique/non-moteur
+                    if i < len(modes) and modes[i] == 'engine':
+                        engine_gain_alt += dz
+                    else:
+                        thermal_gain_alt += dz
+                elif dz < 0.0:
+                    loss_alt += -dz
+
+            variation_alt = z[-1] - z[0]
+            thermal_gain_j = uav_mass * g * thermal_gain_alt
+            engine_gain_j = uav_mass * g * engine_gain_alt
+            gain_j = uav_mass * g * gain_alt
+            loss_j = uav_mass * g * loss_alt
+            variation_j = uav_mass * g * variation_alt
+
             energy[u] = {
-                'net_J': uav_mass * g * delta_z,
-                'gross_J': uav_mass * g * max_z_gain,
+                'variation_J': variation_j,
+                'thermal_gain_J': thermal_gain_j,
+                'engine_gain_J': engine_gain_j,
+                'gain_J': gain_j,
+                'loss_J': loss_j,
             }
         return energy
 
@@ -504,9 +543,21 @@ class PerformanceAnalyzer:
                     rate = metrics.battery_consumption_rate_ah_per_h.get(u, 0.0)
                     print(f"  M1 Ratio moteur OFF: {motor_off:.1f}%")
                     print(f"  M2 Taux conso batterie: {rate:.3f} Ah/h")
-                pe = metrics.potential_energy_j.get(u, {'net_J': 0.0, 'gross_J': 0.0})
-                print(f"  M3 Énergie potentielle nette: {pe.get('net_J', 0.0):.1f} J")
-                print(f"  M3 Énergie potentielle brute: {pe.get('gross_J', 0.0):.1f} J")
+                pe = metrics.potential_energy_j.get(
+                    u,
+                    {
+                        'variation_J': 0.0,
+                        'thermal_gain_J': 0.0,
+                        'engine_gain_J': 0.0,
+                        'gain_J': 0.0,
+                        'loss_J': 0.0,
+                    },
+                )
+                print(f"  M3 Variation énergie potentielle: {pe.get('variation_J', 0.0):.1f} J")
+                print(f"  M3 Gain thermique cumulé: {pe.get('thermal_gain_J', 0.0):.1f} J")
+                print(f"  M3 Gain moteur cumulé: {pe.get('engine_gain_J', 0.0):.1f} J")
+                print(f"  M3 Gain total cumulé: {pe.get('gain_J', 0.0):.1f} J")
+                print(f"  M3 Perte cumulée énergie potentielle: {pe.get('loss_J', 0.0):.1f} J")
         
         # Métriques thermiques
         if metrics.thermals_generated > 0:
@@ -576,8 +627,7 @@ class PerformanceAnalyzer:
     @staticmethod
     def save_metrics_to_file(metrics: PerformanceMetrics, filename: str):
         """Sauvegarder les métriques dans un fichier JSON"""
-        # Créer le dossier multi_uav_logs s'il n'existe pas
-        log_dir = '/home/pix4/GoToWP/multi_uav_logs'
+        log_dir = '/home/pix4/GoToWP/log'
         os.makedirs(log_dir, exist_ok=True)
         
         # Construire le chemin complet
@@ -636,7 +686,9 @@ class PerformanceAnalyzer:
             'scenario_name', 'num_uavs', 'uav_id', 'total_distance_m', 'path_length_points',
             'flight_time_s', 'glide_time_s', 'soar_time_s', 'engine_time_s',
             'motor_off_ratio_pct', 'battery_consumed_ah', 'battery_remaining_ah',
-            'battery_rate_ah_per_h', 'potential_energy_net_j', 'potential_energy_gross_j',
+            'battery_rate_ah_per_h',
+            'potential_energy_variation_j', 'potential_energy_thermal_gain_j',
+            'potential_energy_engine_gain_j', 'potential_energy_gain_j', 'potential_energy_loss_j',
             'thermals_detected_uav', 'thermals_exploited_uav', 'exploited_detected_ratio_pct',
             'patrol_loops', 'soaring_ratio_pct',
             'd_min_m', 'n_coll', 'eta_cov_pct', 't_algo_avg_ms', 't_algo_max_ms',
@@ -647,7 +699,16 @@ class PerformanceAnalyzer:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             for u in range(metrics.num_uavs):
-                pe = metrics.potential_energy_j.get(u, {'net_J': 0.0, 'gross_J': 0.0})
+                pe = metrics.potential_energy_j.get(
+                    u,
+                    {
+                        'variation_J': 0.0,
+                        'thermal_gain_J': 0.0,
+                        'engine_gain_J': 0.0,
+                        'gain_J': 0.0,
+                        'loss_J': 0.0,
+                    },
+                )
                 writer.writerow({
                     'scenario_name': metrics.scenario_name,
                     'num_uavs': metrics.num_uavs,
@@ -662,8 +723,11 @@ class PerformanceAnalyzer:
                     'battery_consumed_ah': metrics.battery_consumed.get(u, 0.0),
                     'battery_remaining_ah': metrics.battery_remaining.get(u, 0.0),
                     'battery_rate_ah_per_h': metrics.battery_consumption_rate_ah_per_h.get(u, 0.0),
-                    'potential_energy_net_j': pe.get('net_J', 0.0),
-                    'potential_energy_gross_j': pe.get('gross_J', 0.0),
+                    'potential_energy_variation_j': pe.get('variation_J', 0.0),
+                    'potential_energy_thermal_gain_j': pe.get('thermal_gain_J', 0.0),
+                    'potential_energy_engine_gain_j': pe.get('engine_gain_J', 0.0),
+                    'potential_energy_gain_j': pe.get('gain_J', 0.0),
+                    'potential_energy_loss_j': pe.get('loss_J', 0.0),
                     'thermals_detected_uav': metrics.thermals_detected_per_uav.get(u, 0),
                     'thermals_exploited_uav': metrics.thermals_per_uav.get(u, 0),
                     'exploited_detected_ratio_pct': metrics.exploited_detected_ratio.get(u, 0.0),

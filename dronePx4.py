@@ -4,6 +4,7 @@ Support de plusieurs drones avec thermiques partagées
 """
 
 import asyncio
+import sys
 import numpy as np
 from mavsdk import System
 from mavsdk.offboard import OffboardError, PositionNedYaw, VelocityNedYaw, AttitudeRate
@@ -253,11 +254,18 @@ class PX4SITLBridge:
         await self.drone.action.set_takeoff_altitude(target_alt)
         print(f"[UAV {self.uav_id}] Décollage vers {target_alt:.0f}m...")
         await self.drone.action.takeoff()
-        
+        alt_tolerance = 1.0
+
         async for position in self.drone.telemetry.position():
-            current_alt = position.relative_altitude_m
-            print(f"[UAV {self.uav_id}] Altitude actuelle: {current_alt:.1f}m / {target_alt:.1f}m", end='\r')
-            if current_alt >= target_alt:
+            # Certains runs donnent une altitude relative négative transitoire.
+            # On combine les deux estimations relatives pour une lecture plus robuste.
+            rel_alt_telemetry = position.relative_altitude_m
+            rel_alt_from_home = position.absolute_altitude_m - self.own_home['alt']
+            current_alt = max(rel_alt_telemetry, rel_alt_from_home)
+            display_alt = max(0.0, current_alt)
+
+            print(f"[UAV {self.uav_id}] Altitude actuelle: {display_alt:.1f}m / {target_alt:.1f}m", end='\r')
+            if current_alt >= (target_alt - alt_tolerance):
                 print(f"[UAV {self.uav_id}] ✓ Altitude atteinte: {current_alt:.1f}m")
                 break
     
@@ -2126,12 +2134,18 @@ async def run_multi_uav_simulation():
             start_positions, end_position, obstacles = scenario_gen.generate_preliminary_collision_scenario(nUAVs, params, home_positions)
             params['obstacles'] = obstacles
             allow_glide = True
+            # Thermiques désactivées pour ce scénario
+            active_thermals = {}
+            thermal_map = ThermalMap()
             
         elif scenario == TestScenario.TRAJECTORY_OPTIMAL_POWERED:
             # Positions de départ = positions home, destination éloignée
             allow_glide = False
             start_positions, end_position, obstacles = scenario_gen.generate_trajectory_optimal_scenario(nUAVs, params, home_positions, allow_glide)
             params['obstacles'] = obstacles
+            # Thermiques désactivées pour ce scénario (vol motorisé)
+            active_thermals = {}
+            thermal_map = ThermalMap()
             
             print(f"\n✓ Scénario trajectoire optimale (motorisé) vers ({end_position['X']:.0f}, {end_position['Y']:.0f})")
             
@@ -2174,7 +2188,7 @@ async def run_multi_uav_simulation():
             print(f"\n✓ Scénario endurance: {len(active_thermals)} thermiques, patrouille en boucle")
         
         elif scenario == TestScenario.COVERAGE:
-            mission_duration = 1200  # 20 minutes
+            mission_duration = 5000  # 80 minutes
             surveillance_objects = scenario_gen.generate_coverage_scenario(nUAVs, params, mission_duration)
             metrics.objects_total = len(surveillance_objects)
             obstacles = generate_random_obstacles(5, params)
@@ -3254,6 +3268,8 @@ async def run_multi_uav_simulation():
         thermal_bridge.stop()
         
         print("\n✓ Mission multi-UAV terminée avec succès!")
+        
+        sys.exit(0)
         
     except KeyboardInterrupt:
         print("\n\n⚠️  Interruption - Atterrissage d'urgence de tous les UAVs")

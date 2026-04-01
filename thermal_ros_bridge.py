@@ -157,6 +157,7 @@ class ThermalROSBridge:
         self._node: Optional[_ThermalBridgeNode] = None
         self._spin_thread: Optional[threading.Thread] = None
         self._running = False
+        self._owns_rclpy_context = False
 
     # ------------------------------------------------------------------ #
     # Lifecycle
@@ -167,6 +168,9 @@ class ThermalROSBridge:
             return
         if not rclpy.ok():
             rclpy.init()
+            self._owns_rclpy_context = True
+        else:
+            self._owns_rclpy_context = False
         self._node = _ThermalBridgeNode(self)
         self._running = True
         self._spin_thread = threading.Thread(
@@ -177,14 +181,31 @@ class ThermalROSBridge:
     def stop(self):
         """Shutdown the bridge cleanly."""
         self._running = False
+
+        # Let spin_once exit before destroying the node to avoid races.
+        if self._spin_thread is not None and self._spin_thread.is_alive():
+            self._spin_thread.join(timeout=1.0)
+        self._spin_thread = None
+
         if self._node is not None:
             self._node.destroy_node()
             self._node = None
-        # Don't call rclpy.shutdown() here — other nodes may still be running
+
+        # If this bridge initialized rclpy itself, also close that context.
+        if self._owns_rclpy_context and rclpy.ok():
+            try:
+                rclpy.shutdown()
+            except Exception as e:
+                print(f"[ThermalROSBridge] rclpy shutdown warning: {e}")
+        self._owns_rclpy_context = False
 
     def _spin_loop(self):
-        while self._running and rclpy.ok():
-            rclpy.spin_once(self._node, timeout_sec=0.1)
+        try:
+            while self._running and rclpy.ok() and self._node is not None:
+                rclpy.spin_once(self._node, timeout_sec=0.1)
+        except Exception as e:
+            if self._running:
+                print(f"[ThermalROSBridge] spin loop stopped with error: {e}")
 
     # ------------------------------------------------------------------ #
     # Public API for dronePx4.py

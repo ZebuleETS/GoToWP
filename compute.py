@@ -753,12 +753,19 @@ def find_nearest_waypoint(current_pos, GOAL_WPs, obstacles, exit_thermal, wp_idx
     Returns:
         int: Index of the nearest waypoint.
     """
+    total_wps = len(GOAL_WPs.get('X', []))
+    if total_wps == 0:
+        return 0
+
+    # Borner l'index de départ pour éviter les bornes invalides
+    start_idx = max(0, min(wp_idx, total_wps - 1))
+
     # Calculer toutes les distances en une seule fois
     distances = compute_horizontal_distance_cartesian(current_pos, GOAL_WPs)
     
     # Filtrer les waypoints qui sont en collision avec des obstacles
     valid_indices = []
-    for i in range(wp_idx, len(GOAL_WPs['X'])):
+    for i in range(start_idx, total_wps):
         waypoint = {
             'X': GOAL_WPs['X'][i],
             'Y': GOAL_WPs['Y'][i],
@@ -768,6 +775,7 @@ def find_nearest_waypoint(current_pos, GOAL_WPs, obstacles, exit_thermal, wp_idx
         for obstacle in obstacles:
             if is_point_in_obstacle(waypoint, obstacle):
                 is_valid = False
+                break
         
         # Vérifier si le waypoint est à l'intérieur du thermique de sortie
         if exit_thermal is not None:
@@ -782,6 +790,31 @@ def find_nearest_waypoint(current_pos, GOAL_WPs, obstacles, exit_thermal, wp_idx
         if is_valid:
             valid_indices.append(i)
 
+    # Fallback robuste : si tous les points sont filtrés, choisir le plus proche
+    # parmi les waypoints restants (et préférer hors thermique si possible).
+    if not valid_indices:
+        fallback_indices = list(range(start_idx, total_wps))
+
+        if exit_thermal is not None:
+            non_thermal_indices = []
+            thermal = {
+                'X': exit_thermal.x,
+                'Y': exit_thermal.y,
+                'radius': exit_thermal.radius
+            }
+            for i in fallback_indices:
+                waypoint = {
+                    'X': GOAL_WPs['X'][i],
+                    'Y': GOAL_WPs['Y'][i],
+                    'Z': GOAL_WPs['Z'][i]
+                }
+                if not is_point_in_thermal(waypoint, thermal):
+                    non_thermal_indices.append(i)
+
+            if non_thermal_indices:
+                fallback_indices = non_thermal_indices
+
+        valid_indices = fallback_indices
 
     nearest_index = min(valid_indices, key=lambda i: distances[i])
     
