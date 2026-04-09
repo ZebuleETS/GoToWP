@@ -158,8 +158,10 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
     t_step = params['time_step']
     # Coefficient alpha pour augmenter la priorité d'un critère (>1)
     alpha = params['alpha']
+    engine_only_mode = params.get('engine_only_mode', False)
+    mode_for_planning = 'engine' if engine_only_mode else FLT_track[Uidx]['flight_mode'][-1]
     # Sélectionner les steps en fonction du mode de vol actuel
-    if FLT_track[Uidx]['flight_mode'][-1] == 'glide':
+    if mode_for_planning == 'glide':
         h_step = params['bearing_step_glide']
         v_step = params['speed_step_glide']
     else:  # 'engine' ou autre mode
@@ -220,7 +222,9 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
         'Y': FLT_data[Uidx]['Y']
     }
 
-    if FLT_data[Uidx]['flight_mode'] == 'glide':
+    mode_for_planning = 'engine' if engine_only_mode else FLT_data[Uidx]['flight_mode']
+
+    if mode_for_planning == 'glide':
         # Pré-calculer les valeurs communes
         current_z = FLT_data[Uidx]['Z']
         delta_z = abs(current_z - LBz)
@@ -253,7 +257,7 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
                 PB_temp['Y'].append(y_pred)
                 PB_temp['Z'].append(LBz)
 
-    elif FLT_data[Uidx]['flight_mode'] == 'engine':
+    elif mode_for_planning == 'engine':
         # Trois possibilités avec le moteur: monter, voler à niveau constant, descendre de manière contrôlée
         
         # Définir les angles de trajectoire pour chaque mode
@@ -303,8 +307,14 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
                     continue
                 altitude_change = V[j] * t_step * sin_climb
                 
+                # Calculer les valeurs pour get_power_consumption
+                FLT_conditions[Uidx]['ground_speed_ms'] = float(V[j] * cos_climb)
+                FLT_conditions[Uidx]['pitch_rads'] = float(climb_angle)
+                FLT_conditions[Uidx]['yaw_rads'] = float(H[i])
+                FLT_conditions[Uidx]['relative_alt_m'] = float(altitude_change)
+
                 # Calculer la consommation d'énergie pour la montée
-                pwr_climb = get_power_consumption(UAV_data, FLT_conditions[Uidx])
+                pwr_climb = get_power_consumption(FLT_conditions[Uidx])
                 power_consumption_climb = pwr_climb * (t_step / 3600)
                 
                 # Calculer la nouvelle position (réutiliser REF)
@@ -344,8 +354,13 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
                 # Distance parcourue horizontalement (égale à la vitesse * temps)
                 horizontal_distance = V[j] * t_step
                 
+                # Calculer les valeurs pour get_power_consumption
+                FLT_conditions[Uidx]['ground_speed_ms'] = float(V[j])
+                FLT_conditions[Uidx]['pitch_rads'] = float(level_angle)
+                FLT_conditions[Uidx]['relative_alt_m'] = float(FLT_data[Uidx]['Z'])  # Altitude inchangée
+                
                 # Calculer la consommation d'énergie pour vol à niveau
-                pwr_level = get_power_consumption(UAV_data, FLT_conditions[Uidx])
+                pwr_level = get_power_consumption(FLT_conditions[Uidx])
                 power_consumption_level = pwr_level * (t_step / 3600)
                 
                 # Calculer la nouvelle position (altitude inchangée)
@@ -576,9 +591,9 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
     # alpha > 1 : augmente l'importance du critère pondéré
     # Mode glide : alpha pondère C_sink (minimiser la descente)
     # Mode engine : alpha pondère C_energy (minimiser la consommation)
-    if FLT_data[Uidx]['flight_mode'] == 'glide' :
+    if mode_for_planning == 'glide' :
         DM = np.column_stack([C_safety, C_distance, C_energy, alpha*C_sink, C_obstacle])
-    elif FLT_data[Uidx]['flight_mode'] == 'engine' :
+    elif mode_for_planning == 'engine' :
         DM = np.column_stack([C_safety, C_distance, alpha*C_energy, C_sink, C_obstacle])
     ranked_indices = decision_making(DM)
     idx = ranked_indices[0]  # Meilleur candidat selon le classement
@@ -614,8 +629,10 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
 
     # Si le mode n'est pas soaring, on vérifie les conditions de vol
     # Si engine et altitude plus petit que working floor ou si glide et altitude plus petit que LBz alors engine else glide
-    if (candidate_mode == 'engine' and FLT_track[Uidx]['Z'][-1] <= params['working_floor'] and FLT_track[Uidx]['current_thermal_id'] is None) or \
-       (candidate_mode == 'glide' and FLT_track[Uidx]['Z'][-1] <= LBz and FLT_track[Uidx]['current_thermal_id'] is None):
+    if engine_only_mode:
+        FLT_track[Uidx]['flight_mode'].append('engine')
+    elif (candidate_mode == 'engine' and FLT_track[Uidx]['Z'][-1] <= params['working_floor'] and FLT_track[Uidx]['current_thermal_id'] is None) or \
+         (candidate_mode == 'glide' and FLT_track[Uidx]['Z'][-1] <= LBz and FLT_track[Uidx]['current_thermal_id'] is None):
         FLT_track[Uidx]['flight_mode'].append('engine')
     else:
         FLT_track[Uidx]['flight_mode'].append('glide')

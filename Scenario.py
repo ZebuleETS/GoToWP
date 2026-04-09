@@ -96,9 +96,9 @@ class SurveillanceObject:
         """Vérifie si l'objet est actif"""
         return self.spawn_time <= current_time <= self.despawn_time
     
-    def is_in_fov(self, uav_x: float, uav_y: float, uav_z: float, fov_radius: float) -> bool:
+    def is_in_fov(self, uav_x: float, uav_y: float, fov_radius: float) -> bool:
         """Vérifie si l'objet est dans le champ de vision"""
-        distance = np.sqrt((self.x - uav_x)**2 + (self.y - uav_y)**2 + (self.z - uav_z)**2)
+        distance = np.sqrt((self.x - uav_x)**2 + (self.y - uav_y)**2)
         return distance <= fov_radius
 
 
@@ -233,26 +233,68 @@ class ScenarioGenerator:
         print("GÉNÉRATION SCÉNARIO: Test de Couverture")
         print("="*70)
         
-        # Générer objets de surveillance
-        num_objects = np.random.randint(15, 30)
+        # Générer davantage d'objets avec fort chevauchement temporel
+        # pour augmenter le nombre d'objets actifs en simultané.
+        num_min = int(params.get('coverage_num_objects_min', 35))
+        num_max = int(params.get('coverage_num_objects_max', 55))
+        if num_max <= num_min:
+            num_max = num_min + 1
+        num_objects = np.random.randint(num_min, num_max)
+
+        # Les apparitions sont concentrées dans une fenêtre plus courte.
+        spawn_window_ratio = float(params.get('coverage_spawn_window_ratio', 0.45))
+        spawn_window_ratio = max(0.05, min(1.0, spawn_window_ratio))
+        spawn_window = mission_duration * spawn_window_ratio
+
+        # Une partie des objets apparaît tôt et reste active longtemps.
+        hot_start_ratio = float(params.get('coverage_hot_start_ratio', 0.30))
+        hot_start_ratio = max(0.0, min(1.0, hot_start_ratio))
+        hot_start_count = int(num_objects * hot_start_ratio)
+        hot_start_window = mission_duration * 0.08
+
+        lifetime_min = float(params.get('coverage_lifetime_min_s', 700.0))
+        lifetime_max = float(params.get('coverage_lifetime_max_s', 1400.0))
+        if lifetime_max < lifetime_min:
+            lifetime_max = lifetime_min
+
         objects = []
+        events = []
         
         for i in range(num_objects):
-            spawn_time = np.random.uniform(0, mission_duration * 0.7)
-            lifetime = np.random.uniform(60, 300)  # 1-5 min
+            if i < hot_start_count:
+                spawn_time = np.random.uniform(0, hot_start_window)
+                lifetime = np.random.uniform(lifetime_min * 1.2, lifetime_max * 1.5)
+            else:
+                spawn_time = np.random.uniform(0, spawn_window)
+                lifetime = np.random.uniform(lifetime_min, lifetime_max)
+
+            despawn_time = spawn_time + lifetime
             
             obj = SurveillanceObject(
                 id=i,
-                x=np.random.uniform(params['X_lower_bound'], params['X_upper_bound']),
-                y=np.random.uniform(params['Y_lower_bound'], params['Y_upper_bound']),
-                z=np.random.uniform(300, 600),
+                x=np.random.uniform(-1500, 1500),
+                y=np.random.uniform(-1500, 1500),
+                z=0,
                 spawn_time=spawn_time,
-                despawn_time=spawn_time + lifetime
+                despawn_time=despawn_time
             )
             objects.append(obj)
+
+            events.append((spawn_time, 1))
+            events.append((despawn_time, -1))
+
+        # Estimation simple du pic d'objets actifs simultanément.
+        active_count = 0
+        peak_active = 0
+        for _, delta in sorted(events, key=lambda e: (e[0], -e[1])):
+            active_count += delta
+            peak_active = max(peak_active, active_count)
         
         print(f"✓ {num_objects} objets de surveillance générés")
-        print(f"✓ Durée de vie: 1-5 min")
+        print(f"✓ Fenêtre d'apparition: 0-{spawn_window:.0f}s ({spawn_window_ratio*100:.0f}% mission)")
+        print(f"✓ Durée de vie: {lifetime_min/60:.1f}-{lifetime_max/60:.1f} min")
+        print(f"✓ Objets early persistants: {hot_start_count}")
+        print(f"✓ Pic estimé objets actifs simultanés: {peak_active}")
         print(f"✓ Distribution spatiale: aléatoire")
         print(f"✓ Champ de vision UAV: 150m")
         
@@ -484,7 +526,7 @@ class PerformanceAnalyzer:
                     
                     # Vérifier si dans le champ de vision
                     if obj.is_in_fov(FLT_track[u]['X'][i], FLT_track[u]['Y'][i], 
-                                    FLT_track[u]['Z'][i], fov_radius):
+                                    fov_radius):
                         if not obj.detected:
                             obj.detected = True
                         if u not in obj.detected_by:

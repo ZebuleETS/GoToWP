@@ -1310,8 +1310,9 @@ class PX4SITLBridge:
 
     async def get_current_telemetry(self):
         """
-        Lire la position ET la vitesse actuelles du drone via MAVSDK.
-        Retourne position ENU + vitesse ENU (groundspeed et vertical).
+        Lire la télémétrie MAVSDK actuelle du drone.
+        Retourne position ENU, vitesse, et champs stricts nécessaires au
+        modèle de puissance MAVSDK.
         
         Returns:
             dict: {
@@ -1319,16 +1320,25 @@ class PX4SITLBridge:
                 'vn': float, 've': float, 'vd': float,    # vitesse NED (m/s)
                 'groundspeed': float,                       # vitesse horizontale (m/s)
                 'bearing': float,                           # cap basé sur vitesse (rad, nav convention)
-                'climb_rate': float                         # taux de montée (m/s, positif = montée)
+                'climb_rate': float,                        # taux de montée (m/s, positif = montée)
+                'ground_speed_ms': float,
+                'airspeed_ms': float,
+                'roll_rads': float,
+                'pitch_rads': float,
+                'yaw_rads': float,
+                'relative_alt_m': float,
+                'throttle_pct': float
             } ou None en cas d'erreur
         """
         try:
             # Lire position
             pos_data = None
+            relative_alt_m = None
             async for position in self.drone.telemetry.position():
                 lat = position.latitude_deg
                 lon = position.longitude_deg
                 alt = position.absolute_altitude_m
+                relative_alt_m = position.relative_altitude_m
                 
                 lat0 = self.simulation_origin['lat']
                 lon0 = self.simulation_origin['lon']
@@ -1348,33 +1358,220 @@ class PX4SITLBridge:
                 vel_data['ve'] = velocity.east_m_s
                 vel_data['vd'] = velocity.down_m_s
                 break
+
+            # Lire métriques fixed-wing (airspeed + throttle)
+            fixedwing_data = {'airspeed_ms': None, 'throttle_pct': None}
+            async for fixedw in self.drone.telemetry.fixedwing_metrics():
+                fixedwing_data['airspeed_ms'] = float(fixedw.airspeed_m_s)
+                fixedwing_data['throttle_pct'] = float(fixedw.throttle_percentage)
+                break
+
+            # Lire odometry (roll/pitch/yaw au même format que drone_core)
+            odometry_data = {'roll_rads': None, 'pitch_rads': None, 'yaw_rads': None}
+            async for odometry in self.drone.telemetry.odometry():
+                odometry_data['roll_rads'] = float(odometry.angular_velocity_body.roll_rad_s)
+                odometry_data['pitch_rads'] = float(odometry.angular_velocity_body.pitch_rad_s)
+                odometry_data['yaw_rads'] = float(odometry.angular_velocity_body.yaw_rad_s)
+                break
             
             # Calculer les métriques dérivées
             vn = vel_data['vn']
             ve = vel_data['ve']
             vd = vel_data['vd']
-            groundspeed = np.sqrt(vn**2 + ve**2)
+            ground_speed_ms = float(np.sqrt(vn**2 + ve**2))
             
             # Bearing en convention math (0=Est, CCW) cohérent avec la simulation
             # X=East, Y=North → atan2(North, East) = atan2(vn, ve)
-            if groundspeed > 0.5:  # Seuil minimum pour un bearing fiable
+            if ground_speed_ms > 0.5:  # Seuil minimum pour un bearing fiable
                 bearing = np.arctan2(vn, ve)
             else:
                 bearing = None  # Pas de bearing fiable si quasi-stationnaire
             
             # Taux de montée (positif = montée, négatif = descente)
             climb_rate = -vd  # NED: down positif = descente
+
+            airspeed_ms = fixedwing_data['airspeed_ms']
+            if airspeed_ms is None:
+                airspeed_ms = ground_speed_ms
+
+            throttle_pct = fixedwing_data['throttle_pct']
+            if throttle_pct is None:
+                throttle_pct = 0.0
+
+            roll_rads = odometry_data['roll_rads'] if odometry_data['roll_rads'] is not None else 0.0
+            pitch_rads = odometry_data['pitch_rads'] if odometry_data['pitch_rads'] is not None else 0.0
+            yaw_rads = odometry_data['yaw_rads'] if odometry_data['yaw_rads'] is not None else 0.0
+
+            if relative_alt_m is None:
+                relative_alt_m = float(pos_data['Z'])
             
             return {
                 **pos_data,
                 **vel_data,
-                'groundspeed': groundspeed,
+                'groundspeed': ground_speed_ms,
                 'bearing': bearing,
-                'climb_rate': climb_rate
+                'climb_rate': climb_rate,
+                'ground_speed_ms': ground_speed_ms,
+                'airspeed_ms': float(airspeed_ms),
+                'roll_rads': float(roll_rads),
+                'pitch_rads': float(pitch_rads),
+                'yaw_rads': float(yaw_rads),
+                'relative_alt_m': float(relative_alt_m),
+                'throttle_pct': float(throttle_pct)
             }
         except Exception as e:
             print(f"[UAV {self.uav_id}] ⚠️  Erreur lecture télémétrie: {e}")
             return None
+
+    async def move_to_enu_target_with_mavsdk(
+        self,
+        target_x_enu,
+        target_y_enu,
+        target_z_enu,
+        target_bearing_rad=None,
+        timeout_s=240.0,
+        horizontal_tolerance_m=120.0,
+        vertical_tolerance_m=40.0,
+    ):
+        """
+        Déplacer le drone vers une cible ENU via MAVSDK action.goto_location.
+        goto_location utilise des coordonnées géodésiques et une altitude AMSL.
+        Utilisé pour le pré-positionnement avant la boucle principale.
+        """
+        if self.drone is None or not self.is_connected:
+            print(f"[UAV {self.uav_id}] ⚠️  Drone non connecté pour pré-positionnement")
+            return False
+
+        # Calcul du yaw cible (convention nav PX4) à partir du bearing simulation.
+        if target_bearing_rad is None:
+            yaw_deg = 0.0
+            try:
+                async for heading in self.drone.telemetry.heading():
+                    yaw_deg = float(heading.heading_deg)
+                    break
+            except Exception:
+                pass
+        else:
+            yaw_deg = float((90.0 - np.degrees(target_bearing_rad)) % 360.0)
+
+        # Convertir la cible ENU simulation en coordonnées géodésiques.
+        # goto_location attend latitude/longitude + altitude AMSL.
+        lat0 = self.simulation_origin['lat']
+        lon0 = self.simulation_origin['lon']
+        alt0 = self.simulation_origin['alt']
+        lat_deg, lon_deg, alt_msl = pm.enu2geodetic(
+            target_x_enu, target_y_enu, target_z_enu,
+            lat0, lon0, alt0
+        )
+
+        # Vérifier que le drone est en vol avant d'envoyer goto_location.
+        in_air = True
+        try:
+            async for in_air_state in self.drone.telemetry.in_air():
+                in_air = bool(in_air_state)
+                break
+        except Exception:
+            pass
+        if not in_air:
+            print(f"[UAV {self.uav_id}] ⚠️  goto_location ignoré: drone au sol")
+            return False
+
+        # Vérification GPS/home (utile en cas de COMMAND_DENIED).
+        try:
+            async for health in self.drone.telemetry.health():
+                if not (health.is_global_position_ok and health.is_home_position_ok):
+                    print(
+                        f"[UAV {self.uav_id}] ⚠️  Position globale/home pas prête "
+                        f"(global={health.is_global_position_ok}, home={health.is_home_position_ok})"
+                    )
+                break
+        except Exception:
+            pass
+
+        # goto_location est une commande Action MAVSDK, on sort d'offboard si nécessaire.
+        if self._offboard_expected:
+            await self.stop_offboard_mode()
+            await asyncio.sleep(0.3)
+
+        try:
+            await self.drone.action.hold()
+            await asyncio.sleep(0.5)
+        except Exception as e:
+            print(f"[UAV {self.uav_id}] ⚠️  Hold avant goto_location échoué: {e}")
+
+        print(
+            f"[UAV {self.uav_id}] Pré-positionnement MAVSDK goto_location "
+            f"→ lat={lat_deg:.6f}, lon={lon_deg:.6f}, alt={alt_msl:.1f}m"
+        )
+
+        max_command_retries = 3
+        goto_sent = False
+        for attempt in range(1, max_command_retries + 1):
+            try:
+                await self.drone.action.goto_location(
+                    float(lat_deg),
+                    float(lon_deg),
+                    float(alt_msl),
+                    float(yaw_deg)
+                )
+                goto_sent = True
+                if attempt > 1:
+                    print(f"[UAV {self.uav_id}] ✓ goto_location accepté après retry ({attempt}/{max_command_retries})")
+                break
+            except Exception as e:
+                print(
+                    f"[UAV {self.uav_id}] ⚠️  goto_location refusé "
+                    f"({attempt}/{max_command_retries}, mode={self._px4_flight_mode.name}): {e}"
+                )
+                if attempt >= max_command_retries:
+                    print(f"[UAV {self.uav_id}] ✗ goto_location échoué après {max_command_retries} tentatives")
+                    return False
+                try:
+                    await self.drone.action.hold()
+                except Exception:
+                    pass
+                await asyncio.sleep(0.8)
+
+        if not goto_sent:
+            return False
+
+        start_time = time.perf_counter()
+        last_log_time = start_time
+
+        while True:
+            now = time.perf_counter()
+            elapsed = now - start_time
+            if elapsed > timeout_s:
+                print(f"[UAV {self.uav_id}] ⚠️  Timeout pré-positionnement après {elapsed:.1f}s")
+                return False
+
+            pos_enu = await self.get_current_position_enu()
+            if pos_enu is None:
+                await asyncio.sleep(0.25)
+                continue
+
+            dx = float(target_x_enu - pos_enu['X'])
+            dy = float(target_y_enu - pos_enu['Y'])
+            dz = float(target_z_enu - pos_enu['Z'])
+
+            horizontal_error = float(np.hypot(dx, dy))
+            vertical_error = abs(dz)
+
+            if horizontal_error <= horizontal_tolerance_m and vertical_error <= vertical_tolerance_m:
+                print(
+                    f"[UAV {self.uav_id}] ✓ Pré-positionnement atteint "
+                    f"(err_h={horizontal_error:.1f}m, err_v={vertical_error:.1f}m)"
+                )
+                return True
+
+            if now - last_log_time >= 5.0:
+                print(
+                    f"[UAV {self.uav_id}] Pré-positionnement en cours: "
+                    f"err_h={horizontal_error:.0f}m, err_v={vertical_error:.0f}m"
+                )
+                last_log_time = now
+
+            await asyncio.sleep(0.5)
 
 
 class MultiUAVController:
@@ -1476,6 +1673,132 @@ class MultiUAVController:
             print(f"⚠️  Mode offboard activé pour {success_count}/{self.nUAVs} UAVs")
             return False
 
+    async def preposition_to_first_waypoint_mavsdk(self, GOAL_WPs, current_wp_indices):
+        """
+        Pré-positionner chaque UAV vers son premier waypoint actif via MAVSDK.
+
+        Cette phase est exécutée avant la boucle principale afin d'éviter
+        un démarrage trop loin du parcours (ex: plusieurs kilomètres).
+        Logique de robustesse: passe parallèle, puis reprise séquentielle
+        des UAVs en échec (même principe que start_offboard_all).
+        """
+        print("\nPré-positionnement MAVSDK vers le premier waypoint actif...")
+
+        async def _build_preposition_target(u):
+            if u >= len(self.bridges):
+                return None
+
+            bridge = self.bridges[u]
+            if bridge.is_landing:
+                return None
+
+            wp_x = GOAL_WPs.get(u, {}).get('X', [])
+            wp_y = GOAL_WPs.get(u, {}).get('Y', [])
+            wp_z = GOAL_WPs.get(u, {}).get('Z', [])
+            max_idx = min(len(wp_x), len(wp_y), len(wp_z)) - 1
+
+            if max_idx < 0:
+                print(f"[UAV {u}] ⚠️  Aucun waypoint disponible pour pré-positionnement")
+                return None
+
+            target_idx = int(current_wp_indices.get(u, 0))
+            target_idx = max(0, min(target_idx, max_idx))
+
+            target_x = float(wp_x[target_idx])
+            target_y = float(wp_y[target_idx])
+            target_z = float(wp_z[target_idx])
+
+            target_bearing = None
+            if target_idx > 0:
+                dx = target_x - float(wp_x[target_idx - 1])
+                dy = target_y - float(wp_y[target_idx - 1])
+                if abs(dx) > 1e-6 or abs(dy) > 1e-6:
+                    target_bearing = float(np.arctan2(dy, dx))
+
+            timeout_s = 240.0
+            try:
+                current_pos = await bridge.get_current_position_enu()
+                if current_pos is not None:
+                    dist_to_target = float(np.hypot(target_x - current_pos['X'], target_y - current_pos['Y']))
+                    min_speed = max(float(self.UAV_data.get('min_airspeed', 8.0)), 1.0)
+                    timeout_s = max(120.0, min(480.0, (dist_to_target / min_speed) * 2.0))
+            except Exception:
+                pass
+
+            return {
+                'x': target_x,
+                'y': target_y,
+                'z': target_z,
+                'bearing': target_bearing,
+                'timeout_s': timeout_s,
+            }
+
+        async def _run_preposition(u, target):
+            return await self.bridges[u].move_to_enu_target_with_mavsdk(
+                target['x'],
+                target['y'],
+                target['z'],
+                target_bearing_rad=target['bearing'],
+                timeout_s=target['timeout_s'],
+            )
+
+        targets = {}
+        for u in range(self.nUAVs):
+            target = await _build_preposition_target(u)
+            if target is not None:
+                targets[u] = target
+
+        if not targets:
+            print("⚠️  Aucun UAV à pré-positionner")
+            return False
+
+        # Passe 1: commandes en parallèle.
+        ordered_uavs = sorted(targets.keys())
+        tasks = [asyncio.create_task(_run_preposition(u, targets[u])) for u in ordered_uavs]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        success_uavs = set()
+        failed_uavs = []
+
+        for idx, result in enumerate(results):
+            u = ordered_uavs[idx]
+            if isinstance(result, Exception):
+                print(f"[UAV {u}] ⚠️  Erreur pré-positionnement: {result}")
+                failed_uavs.append(u)
+                continue
+            if result:
+                success_uavs.add(u)
+            else:
+                failed_uavs.append(u)
+
+        # Passe 2: vérification/reprise séquentielle pour les UAVs en échec.
+        if failed_uavs:
+            print("\nVérification pré-positionnement: reprise séquentielle des UAVs en échec...")
+            for u in failed_uavs:
+                retry_success = False
+                retry_timeout = min(float(targets[u]['timeout_s']) * 1.5, 720.0)
+                for attempt in range(1, 3):
+                    print(f"[UAV {u}] Retry goto_location ({attempt}/2)...")
+                    retry_success = await self.bridges[u].move_to_enu_target_with_mavsdk(
+                        targets[u]['x'],
+                        targets[u]['y'],
+                        targets[u]['z'],
+                        target_bearing_rad=targets[u]['bearing'],
+                        timeout_s=retry_timeout,
+                    )
+                    if retry_success:
+                        success_uavs.add(u)
+                        break
+                    await asyncio.sleep(0.8)
+
+                if not retry_success:
+                    print(f"[UAV {u}] ⚠️  Pré-positionnement non confirmé après reprise")
+
+        success_count = len(success_uavs)
+        expected_count = len(targets)
+        print(f"✓ Pré-positionnement MAVSDK terminé: {success_count}/{expected_count} UAVs proches du premier waypoint")
+        return success_count == expected_count
+
     async def recover_offboard_all(self, FLT_track):
         """Vérifier et récupérer le mode offboard / orbit pour tous les UAVs.
         
@@ -1561,12 +1884,24 @@ class MultiUAVController:
                 # Synchroniser la vitesse réelle vers FLT_conditions
                 # pour que gotoWaypoint utilise l'airspeed réelle de PX4
                 groundspeed = telemetry['groundspeed']
+                measured_airspeed = telemetry['airspeed_ms']
                 min_v = bridge.UAV_data.get('min_airspeed', 8.0)
                 max_v = bridge.UAV_data.get('max_airspeed', 30.0)
-                if groundspeed > 0.5:  # Seuil minimum de fiabilité
+                if measured_airspeed > 0.5:
+                    clamped_speed = np.clip(measured_airspeed, min_v, max_v)
+                    FLT_conditions[u]['airspeed'] = clamped_speed
+                elif groundspeed > 0.5:  # Seuil minimum de fiabilité
                     # Borner dans la plage admissible de l'UAV
                     clamped_speed = np.clip(groundspeed, min_v, max_v)
                     FLT_conditions[u]['airspeed'] = clamped_speed
+
+                # Champs stricts MAVSDK pour get_power_consumption
+                FLT_conditions[u]['ground_speed_ms'] = float(telemetry['ground_speed_ms'])
+                FLT_conditions[u]['roll_rads'] = float(telemetry['roll_rads'])
+                FLT_conditions[u]['pitch_rads'] = float(telemetry['pitch_rads'])
+                FLT_conditions[u]['yaw_rads'] = float(telemetry['yaw_rads'])
+                FLT_conditions[u]['relative_alt_m'] = float(telemetry['relative_alt_m'])
+                FLT_conditions[u]['throttle_pct'] = float(telemetry['throttle_pct'])
                 
             except Exception as e:
                 print(f"[UAV {u}] ⚠️  Sync MAVSDK→simulation échouée: {e}")
@@ -1965,10 +2300,10 @@ def generate_lawnmower_trajectories(nUAVs, params, UAV_data, fov_radius):
         dict: Trajectoires pour chaque UAV {0: {X: [], Y: [], Z: []}, ...}
     """
     
-    x_min = params['X_lower_bound']
-    x_max = params['X_upper_bound']
-    y_min = params['Y_lower_bound']
-    y_max = params['Y_upper_bound']
+    x_min = -1500.0
+    x_max = 1500.0
+    y_min = -1500.0
+    y_max = 1500.0
     altitude = params['working_floor']
     
     coverage_area = {
@@ -2029,8 +2364,12 @@ async def run_multi_uav_simulation():
     print(f"\n✓ Configuration: {scenario.value} avec {nUAVs} UAVs")
     print("\n⏳ Connexion aux drones pour obtenir les positions home...")
     
+    battery_capacity_mah = 10000 # Capacité de la batterie en mAh ou 10 Ah
+    average_voltage = 22.5453
+    battery_capacity_wh = (battery_capacity_mah * average_voltage) / 1000
+    
     UAV_data = dict()
-    UAV_data['maximum_battery_capacity'] = 10.0
+    UAV_data['maximum_battery_capacity'] = battery_capacity_wh
     UAV_data['desired_reserved_battery_capacity'] = UAV_data['maximum_battery_capacity'] * 0.2
     UAV_data['empty_weight'] = 1.6
     UAV_data['max_power_consumption'] = 775.0
@@ -2068,6 +2407,8 @@ async def run_multi_uav_simulation():
     # En mode glide : augmente la priorité de minimiser la descente (C_sink)
     # En mode engine : augmente la priorité de minimiser la consommation (C_energy)
     params['alpha'] = 2  # Valeur: entre 1.0 et 3.0
+    # Si True, la navigation n'utilise que le mode moteur.
+    params['engine_only_mode'] = False
     
     # Initialiser métriques de performance
     metrics = PerformanceMetrics(
@@ -2141,6 +2482,7 @@ async def run_multi_uav_simulation():
         elif scenario == TestScenario.TRAJECTORY_OPTIMAL_POWERED:
             # Positions de départ = positions home, destination éloignée
             allow_glide = False
+            params['engine_only_mode'] = True
             start_positions, end_position, obstacles = scenario_gen.generate_trajectory_optimal_scenario(nUAVs, params, home_positions, allow_glide)
             params['obstacles'] = obstacles
             # Thermiques désactivées pour ce scénario (vol motorisé)
@@ -2217,8 +2559,13 @@ async def run_multi_uav_simulation():
         
         FLT_track = {k: {} for k in range(nUAVs)}
         FLT_track_keys = ['X', 'Y', 'Z', 'bearing', 'battery_capacity', 'flight_time', 
-                          'flight_mode', 'in_evaluation', 'current_thermal_id', 'soaring_start_time']
+                          'flight_mode', 'in_evaluation', 'current_thermal_id', 'soaring_start_time',
+                          'seeking_thermal', 'seeking_thermal_id', 'seeking_wp_idx', 'visited_thermals', 'thermal_exit_cooldown',
+                          'thermal_exploitation_log', 'thermals_detected_count', 'collisions_avoided_count']
         FLT_conditions = {k: {} for k in range(nUAVs)}
+        FLT_conditions_keys = ['airspeed', 'weight', 'flight_path_angle', 'grav_accel', 'bank_angle',
+                               'airspeed_dot', 'air_density', 'battery_capacity', 'ground_speed_ms', 'airspeed_ms',
+                               'roll_rads', 'pitch_rads', 'yaw_rads', 'relative_alt_m', 'throttle_pct']
         END_WPs = {k: {} for k in range(nUAVs)}
         WPs_keys = ['X', 'Y', 'Z']
         soar_keys = ['X', 'Y', 'Z', 'bearing', 'flight_path_angle', 'bank_angle']
@@ -2234,6 +2581,8 @@ async def run_multi_uav_simulation():
             FLT_track[u] = dict()
             for keys in FLT_track_keys:
                 FLT_track[u][keys] = []
+            for keys in FLT_conditions_keys:
+                FLT_conditions[u][keys] = []
             for keys in WPs_keys:
                 END_WPs[u][keys] = []
                 GOAL_WPs[u][keys] = []
@@ -2250,6 +2599,13 @@ async def run_multi_uav_simulation():
             FLT_conditions[u]['airspeed_dot'] = 0.0
             FLT_conditions[u]['air_density'] = air_density
             FLT_conditions[u]['battery_capacity'] = UAV_data['maximum_battery_capacity']
+            FLT_conditions[u]['ground_speed_ms'] = 13.0
+            FLT_conditions[u]['airspeed_ms'] = 13.0
+            FLT_conditions[u]['roll_rads'] = 0.0
+            FLT_conditions[u]['pitch_rads'] = 0.0
+            FLT_conditions[u]['yaw_rads'] = 0.0
+            FLT_conditions[u]['relative_alt_m'] = params['working_floor']
+            FLT_conditions[u]['throttle_pct'] = 0.0
 
             if scenario not in (TestScenario.COVERAGE, TestScenario.ENDURANCE):
                 END_WPs[u]['X'].append(end_position['X'])
@@ -2359,8 +2715,21 @@ async def run_multi_uav_simulation():
         await controller.arm_and_takeoff_all()
         
         #await controller.set_altitude_all(400.0)
-        
-        # Démarrer le mode offboard pour tous
+
+        # Pour les scénarios de trajectoire optimale, rapprocher physiquement
+        # les drones du premier waypoint avant de démarrer la simulation.
+        if scenario in (TestScenario.TRAJECTORY_OPTIMAL_POWERED, TestScenario.TRAJECTORY_OPTIMAL_GLIDE, TestScenario.COVERAGE):
+            preposition_ok = await controller.preposition_to_first_waypoint_mavsdk(
+                GOAL_WPs,
+                current_wp_indices
+            )
+            if not preposition_ok:
+                print("⚠️  Pré-positionnement incomplet: la simulation démarre, mais certains UAVs peuvent rester éloignés du départ")
+            # Écraser le dernier point FLT_track avec la position réelle atteinte
+            # pour démarrer la boucle depuis l'état MAVSDK courant.
+            await controller.sync_all_positions_from_mavsdk(FLT_track, FLT_conditions)
+
+        # Démarrer le mode offboard pour tous après le pré-positionnement.
         await controller.start_offboard_all()
         
         print("\n" + "="*70)
@@ -2594,12 +2963,12 @@ async def run_multi_uav_simulation():
                     # 4. Thermique épuisée : climb rate trop faible après un temps suffisant
                     #    Condition renforcée : durée > 45s ET perte nette d'altitude (climb < 0)
                     #    OU durée > 60s ET gain négligeable (climb < 0.1)
-                    if not should_exit_soaring and alt_var['duration'] > 45 and alt_var['avg_climb_rate'] < 0:
-                        should_exit_soaring = True
-                        exit_reason = f"perte d'altitude nette après {alt_var['duration']:.0f}s (climb={alt_var['avg_climb_rate']:.2f}m/s)"
-                    elif not should_exit_soaring and alt_var['duration'] > 60 and alt_var['avg_climb_rate'] < 0.1:
-                        should_exit_soaring = True
-                        exit_reason = f"gain négligeable après {alt_var['duration']:.0f}s (climb={alt_var['avg_climb_rate']:.2f}m/s)"
+                    #if not should_exit_soaring and alt_var['duration'] > 45 and alt_var['avg_climb_rate'] < 0:
+                    #    should_exit_soaring = True
+                    #    exit_reason = f"perte d'altitude nette après {alt_var['duration']:.0f}s (climb={alt_var['avg_climb_rate']:.2f}m/s)"
+                    #elif not should_exit_soaring and alt_var['duration'] > 60 and alt_var['avg_climb_rate'] < 0.1:
+                    #    should_exit_soaring = True
+                    #    exit_reason = f"gain négligeable après {alt_var['duration']:.0f}s (climb={alt_var['avg_climb_rate']:.2f}m/s)"
                     # 5. Durée max de soaring
                     if not should_exit_soaring and soaring_duration > 300:
                         should_exit_soaring = True
@@ -2912,7 +3281,7 @@ async def run_multi_uav_simulation():
                         
                         # Endurance : considérer toutes les thermiques connues (ROS bridge)
                         # Autres scénarios : seulement les thermiques physiquement détectées
-                        if endurance_seeking:
+                        if endurance_seeking or scenario == TestScenario.COVERAGE:
                             candidate_thermals = active_thermals or {}
                         else:
                             candidate_thermals = thermal_map.get_detected_thermals() if thermal_map else {}
@@ -2978,7 +3347,7 @@ async def run_multi_uav_simulation():
                     for u in range(nUAVs):
                         if len(FLT_track[u]['X']) > 0 and obj.is_in_fov(
                             FLT_track[u]['X'][-1], FLT_track[u]['Y'][-1],
-                            FLT_track[u]['Z'][-1], fov_radius
+                            fov_radius
                         ):
                             obj.detected = True
                             if u not in obj.detected_by:

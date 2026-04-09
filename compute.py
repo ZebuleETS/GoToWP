@@ -1,21 +1,71 @@
 from math import atan, cos, sin, pi, sqrt, asin, atan2
 import numpy as np
 
-def get_power_consumption(uav_data, flight_conditions):
+def get_power_consumption(flight_conditions):
     """
-    Calculates the total power consumption of the UAV considering energy conversion efficiency.
+    Calculates UAV power consumption from strict MAVSDK telemetry.
+
+    This function intentionally uses only the MAVSDK-based regression model
+    (same as drone_core.predicted_power) and does not fallback to the legacy
+    aerodynamic model.
 
     Args:
-        uav_data (dict): Dictionary containing UAV parameters.
         flight_conditions (dict): Dictionary of current flight conditions.
 
     Returns:
         float: Power consumption (W).
-    """
-    power_consumption = (get_shaft_power(uav_data, flight_conditions) /
-                         uav_data['energy_conversion_efficiency'])
 
-    return power_consumption
+    Raises:
+        KeyError: If required MAVSDK telemetry keys are missing.
+        ValueError: If telemetry values are None/non-numeric/non-finite.
+    """
+    required_keys = (
+        'ground_speed_ms',
+        'airspeed',
+        'roll_rads',
+        'pitch_rads',
+        'yaw_rads',
+        'relative_alt_m',
+        'throttle_pct',
+    )
+
+    missing_keys = [k for k in required_keys if k not in flight_conditions]
+    if missing_keys:
+        raise KeyError(
+            "Missing required MAVSDK telemetry fields for strict power model: "
+            + ", ".join(missing_keys)
+        )
+
+    parsed = {}
+    for key in required_keys:
+        value = flight_conditions[key]
+        if value is None:
+            raise ValueError(f"MAVSDK telemetry field '{key}' is None")
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"MAVSDK telemetry field '{key}' is not numeric: {value}")
+        if not np.isfinite(value):
+            raise ValueError(f"MAVSDK telemetry field '{key}' is not finite: {value}")
+        parsed[key] = value
+
+    gnd = parsed['ground_speed_ms']
+    air = parsed['airspeed']
+    roll = parsed['roll_rads']
+    pitch = parsed['pitch_rads']
+    yaw = parsed['yaw_rads']
+    alt = parsed['relative_alt_m']
+    thr = parsed['throttle_pct']
+
+    # Handle both [0,1] and [0,100] throttle conventions.
+    if 0.0 <= thr <= 1.0:
+        thr *= 100.0
+
+    predicted_power = (
+        571.52 + (3.8 * gnd) - (14.85 * air) + (0.012 * roll)
+        + (3.44 * pitch) - (0.058 * yaw) - (1.46 * alt) + (12.0 * thr)
+    )
+    return max(predicted_power, 0.0)
 
 
 def get_shaft_power(uav_data, flight_conditions):
@@ -549,7 +599,7 @@ def calculate_optimal_climb_angle(UAV_data, flight_conditions):
     test_conditions['bank_angle'] = 0.0
     
     # Calculer la puissance nécessaire pour vol horizontal
-    level_power = get_power_consumption(UAV_data, test_conditions)
+    level_power = get_power_consumption(test_conditions)
     
     # Calculer la puissance maximale disponible
     max_power = UAV_data['max_power_consumption'] * UAV_data['energy_conversion_efficiency']

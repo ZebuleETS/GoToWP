@@ -30,7 +30,8 @@ PX4_DIR="$HOME/GoToWP/PX4-Autopilot-soaring"
 MAVSDK_DIR="$HOME/MAVSDK"
 GOTOWP_DIR="$HOME/GoToWP"
 XRCE_DDS_DIR="$HOME/Micro-XRCE-DDS-Agent"
-AUTOSOARING_DIR="$GOTOWP_DIR/autosoaring/src"
+AUTOSOARING_DIR="$GOTOWP_DIR/autosoaring"
+AUTOSOARING_CONFIG_FILE="$AUTOSOARING_DIR/src/autosoaring_pkg/config/thermal_config.yaml"
 LOG_DIR="$GOTOWP_DIR/multi_uav_logs"
 
 # Configurer les chemins pour les plugins Gazebo custom
@@ -279,8 +280,15 @@ else
     exit 1
 fi
 
+if [ ! -f "$AUTOSOARING_CONFIG_FILE" ]; then
+    echo -e "${RED}❌ Fichier de config thermal introuvable : $AUTOSOARING_CONFIG_FILE${NC}"
+    cleanup
+    exit 1
+fi
+
 # Lancer le thermal generator node (crée les thermiques dans Gazebo + publie sur ROS2)
 ros2 launch autosoaring_pkg autosoaring_launch.py mode:=generator \
+    config_file:=$AUTOSOARING_CONFIG_FILE \
     > $LOG_DIR/ros2_autosoaring.log 2>&1 &
 ROS2_LAUNCH_PID=$!
 echo -e "${GREEN}✓ ROS2 thermal_generator_node lancé (PID: $ROS2_LAUNCH_PID)${NC}"
