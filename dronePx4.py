@@ -254,7 +254,7 @@ class PX4SITLBridge:
         await self.drone.action.set_takeoff_altitude(target_alt)
         print(f"[UAV {self.uav_id}] Décollage vers {target_alt:.0f}m...")
         await self.drone.action.takeoff()
-        alt_tolerance = 1.0
+        alt_tolerance = 0.5
 
         async for position in self.drone.telemetry.position():
             # Certains runs donnent une altitude relative négative transitoire.
@@ -2369,6 +2369,7 @@ async def run_multi_uav_simulation():
     battery_capacity_wh = (battery_capacity_mah * average_voltage) / 1000
     
     UAV_data = dict()
+    UAV_data['battery_nominal_voltage_v'] = average_voltage
     UAV_data['maximum_battery_capacity'] = battery_capacity_wh
     UAV_data['desired_reserved_battery_capacity'] = UAV_data['maximum_battery_capacity'] * 0.2
     UAV_data['empty_weight'] = 1.6
@@ -2867,6 +2868,7 @@ async def run_multi_uav_simulation():
                                 print(f"  UAV {u}: ({ux:.0f},{uy:.0f}) → thermique {nearest_tid} "
                                       f"dist={min_dist:.0f}m ({inside} rayon={th_obj.radius:.0f}m)")
                 print(f"{'='*60}\n")
+            
             z_lower = params['Z_lower_bound']
             low_alt_margin = 100.0
             # Endurance : seuil proactif pour chercher des thermiques
@@ -3013,11 +3015,20 @@ async def run_multi_uav_simulation():
                         'Y': FLT_track[u]['Y'][-1],
                         'Z': FLT_track[u]['Z'][-1]
                     }
+
+                    # Au-dessus du working_floor, ignorer les thermiques
+                    # (pas d'entrée en évaluation/soaring tant que l'altitude est haute).
+                    if current_pos['Z'] > params['working_floor']:
+                        if FLT_track[u]['seeking_thermal']:
+                            print(f"↑ UAV {u}: Altitude au-dessus du working_floor ({current_pos['Z']:.0f}m > "
+                                  f"{params['working_floor']:.0f}m) → Annulation seeking thermique")
+                            _cancel_seeking(FLT_track[u], GOAL_WPs[u], current_wp_indices, u)
+                        continue
                     
-                    # Réinitialiser les thermiques visitées dont le cooldown a expiré (60s)
+                    # Réinitialiser les thermiques visitées dont le cooldown a expiré (150s)
                     # Ne PAS faire un reset global basé sur l'altitude (causait des boucles
                     # sortie/re-entrée immédiates quand le drone est encore dans le rayon)
-                    THERMAL_COOLDOWN_SECONDS = 60.0
+                    THERMAL_COOLDOWN_SECONDS = 150.0
                     expired_cooldowns = [
                         tid for tid, exit_t in FLT_track[u]['thermal_exit_cooldown'].items()
                         if current_time - exit_t > THERMAL_COOLDOWN_SECONDS
@@ -3263,6 +3274,7 @@ async def run_multi_uav_simulation():
                     # Endurance : chercher proactivement dès que sous le working_floor
                     # Autres scénarios : seulement en secours à basse altitude
                     seeking_threshold = params['working_floor'] if endurance_seeking else (z_lower + low_alt_margin)
+                    print(f"UAV {u}: Altitude={current_alt:.0f}m, seuil seeking={seeking_threshold:.0f}m")
                     if current_alt <= seeking_threshold:
                         current_x = FLT_track[u]['X'][-1]
                         current_y = FLT_track[u]['Y'][-1]
@@ -3281,10 +3293,11 @@ async def run_multi_uav_simulation():
                         
                         # Endurance : considérer toutes les thermiques connues (ROS bridge)
                         # Autres scénarios : seulement les thermiques physiquement détectées
-                        if endurance_seeking or scenario == TestScenario.COVERAGE:
+                        if endurance_seeking:
                             candidate_thermals = active_thermals or {}
                         else:
                             candidate_thermals = thermal_map.get_detected_thermals() if thermal_map else {}
+                        print(f"  UAV {u}: Recherche thermique parmi {len(candidate_thermals)} candidate(s) ")
                         for tid, t_obj in candidate_thermals.items():
                             thermal = t_obj
                             if not thermal.is_active(current_time):
@@ -3369,7 +3382,9 @@ async def run_multi_uav_simulation():
                 if bridge.is_landing:
                     continue
                 if FLT_track[u]['battery_capacity'][-1] <= UAV_data['desired_reserved_battery_capacity']:
-                    print(f"\n⚠️  UAV {u} batterie faible ({FLT_track[u]['battery_capacity'][-1]:.1f}Ah) - Atterrissage d'urgence!")
+                    battery_wh = FLT_track[u]['battery_capacity'][-1]
+                    battery_mah = (battery_wh / average_voltage) * 1000.0 if average_voltage > 0 else 0.0
+                    print(f"\n⚠️  UAV {u} batterie faible ({battery_wh:.1f}Wh | {battery_mah:.0f}mAh) - Atterrissage d'urgence!")
                     # Marquer comme en atterrissage dans FLT_track (pour gotoWaypointMulti)
                     FLT_track[u]['flight_mode'].append('landing')
                     # Arrêter l'orbite si en cours avant l'atterrissage
@@ -3426,7 +3441,7 @@ async def run_multi_uav_simulation():
                         battery = FLT_track[u]['battery_capacity'][-1]
                         airspeed = FLT_conditions[u]['airspeed']
                         
-                        status = f"UAV {u}: {pos_str} | {mode} | V:{airspeed:.1f}m/s | Bat: {battery:.1f}"
+                        status = f"UAV {u}: {pos_str} | {mode} | V:{airspeed:.1f}m/s | Bat: {battery:.1f}Wh"
                         
                         # Ajouter info thermique si applicable
                         if FLT_track[u]['current_thermal_id'] is not None:
@@ -3476,12 +3491,33 @@ async def run_multi_uav_simulation():
             
             if not (x_len == y_len == z_len == time_len == mode_len):
                 print(f"⚠️  UAV {u}: Longueurs incohérentes - X:{x_len}, Y:{y_len}, Z:{z_len}, time:{time_len}, mode:{mode_len}")
-                data_valid = False
             
             # Si flight_time est vide ou incomplet, le reconstruire
             if time_len == 0 or time_len < x_len:
                 print(f"⚠️  UAV {u}: flight_time incomplet ({time_len}/{x_len}) - reconstruction...")
                 FLT_track[u]['flight_time'] = [i * params['time_step'] for i in range(x_len)]
+            elif time_len > x_len:
+                print(f"⚠️  UAV {u}: flight_time trop long ({time_len}/{x_len}) - troncature...")
+                FLT_track[u]['flight_time'] = FLT_track[u]['flight_time'][:x_len]
+
+            # Normaliser flight_mode sur la longueur des échantillons de vol
+            if mode_len == 0 and x_len > 0:
+                print(f"⚠️  UAV {u}: flight_mode vide - remplissage en 'glide'")
+                FLT_track[u]['flight_mode'] = ['glide'] * x_len
+            elif mode_len < x_len:
+                last_mode = FLT_track[u]['flight_mode'][-1] if mode_len > 0 else 'glide'
+                print(f"⚠️  UAV {u}: flight_mode incomplet ({mode_len}/{x_len}) - padding avec '{last_mode}'...")
+                FLT_track[u]['flight_mode'].extend([last_mode] * (x_len - mode_len))
+            elif mode_len > x_len:
+                print(f"⚠️  UAV {u}: flight_mode trop long ({mode_len}/{x_len}) - troncature...")
+                FLT_track[u]['flight_mode'] = FLT_track[u]['flight_mode'][:x_len]
+
+            final_time_len = len(FLT_track[u]['flight_time'])
+            final_mode_len = len(FLT_track[u]['flight_mode'])
+            if not (x_len == y_len == z_len == final_time_len == final_mode_len):
+                print(f"⚠️  UAV {u}: Incohérence persistante après correction - "
+                      f"X:{x_len}, Y:{y_len}, Z:{z_len}, time:{final_time_len}, mode:{final_mode_len}")
+                data_valid = False
         
         if data_valid:
             print("✓ Données de vol validées")
@@ -3523,6 +3559,7 @@ async def run_multi_uav_simulation():
         if decision_calls > 0:
             metrics.algorithm_time_avg_ms = (total_decision_time / decision_calls) * 1000.0
             metrics.algorithm_time_max_ms = max_decision_time * 1000.0
+        metrics.battery_nominal_voltage_v = UAV_data.get('battery_nominal_voltage_v', 0.0)
         
         # Calculer les métriques de batterie
         for u in range(nUAVs):
@@ -3530,7 +3567,7 @@ async def run_multi_uav_simulation():
                 metrics.battery_remaining[u] = FLT_track[u]['battery_capacity'][-1]
                 metrics.battery_consumed[u] = UAV_data['maximum_battery_capacity'] - metrics.battery_remaining[u]
                 total = metrics.total_flight_time.get(u, 0.0)
-                metrics.battery_consumption_rate_ah_per_h[u] = (
+                metrics.battery_consumption_rate_wh_per_h[u] = (
                     metrics.battery_consumed[u] / (total / 3600.0)
                     if total > 0 else 0.0
                 )
@@ -3626,7 +3663,9 @@ async def run_multi_uav_simulation():
                 
                 print(f"\n  UAV {u}:")
                 print(f"    Position finale: {final_pos}")
-                print(f"    Batterie: {battery:.2f}/{UAV_data['maximum_battery_capacity']:.2f}")
+                battery_mah = (battery / average_voltage) * 1000.0 if average_voltage > 0 else 0.0
+                battery_max_mah = (UAV_data['maximum_battery_capacity'] / average_voltage) * 1000.0 if average_voltage > 0 else 0.0
+                print(f"    Batterie: {battery:.2f}/{UAV_data['maximum_battery_capacity']:.2f} Wh ({battery_mah:.0f}/{battery_max_mah:.0f} mAh)")
                 print(f"    Temps de vol: {flight_time:.1f}s")
                 print(f"    Modes: {mode_counts}")
         
