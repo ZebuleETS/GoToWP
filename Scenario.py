@@ -161,14 +161,6 @@ class ScenarioGenerator:
         print(f"GÉNÉRATION SCÉNARIO: {scenario_name}")
         print("="*70)
         
-        # Zone de test délimitée
-        test_zone = {
-            'x_min': params['X_lower_bound'] + 500,
-            'x_max': params['X_upper_bound'] - 500,
-            'y_min': params['Y_lower_bound'] + 500,
-            'y_max': params['Y_upper_bound'] - 500
-        }
-        
         # Destination commune éloignée du home (0,0)
         target_x = params['X_upper_bound'] * 0.65
         target_y = params['Y_upper_bound'] * 0.65
@@ -220,8 +212,8 @@ class ScenarioGenerator:
         print(f"  - Faibles (<2.5 m/s): {thermal_stats['weak']}")
         print(f"  - Moyennes (2.5-3.5 m/s): {thermal_stats['medium']}")
         print(f"  - Fortes (>3.5 m/s): {thermal_stats['strong']}")
-        print(f"✓ Durée de vie: 5-15 min")
-        print(f"✓ Rayon: 80-200m")
+        print("✓ Durée de vie: 5-15 min")
+        print("✓ Rayon: 80-200m")
         
         return thermals, thermal_stats
     
@@ -296,8 +288,8 @@ class ScenarioGenerator:
         print(f"✓ Durée de vie: {lifetime_min/60:.1f}-{lifetime_max/60:.1f} min")
         print(f"✓ Objets early persistants: {hot_start_count}")
         print(f"✓ Pic estimé objets actifs simultanés: {peak_active}")
-        print(f"✓ Distribution spatiale: aléatoire")
-        print(f"✓ Champ de vision UAV: 150m")
+        print("✓ Distribution spatiale: aléatoire")
+        print("✓ Champ de vision UAV: 150m")
         
         return objects
 

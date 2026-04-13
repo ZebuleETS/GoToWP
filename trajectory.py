@@ -1,12 +1,8 @@
 import numpy as np
-from math import pi, asin, cos
 from abc import ABC, abstractmethod
 from compute import (
     check_trajectory_obstacles,
-    compute_bearing_cartesian,
-    compute_distance_cartesian,
     extract_waypoint,
-    get_destination_from_range_and_bearing_cartesian,
     get_destinations,
     get_power_consumption,
 )
@@ -838,7 +834,7 @@ class TrajectoryEvaluator:
             # Calculer la puissance pour ce segment
             try:
                 power = get_power_consumption(self.UAV_data, current_flight_conditions)
-            except:
+            except Exception:
                 # En cas d'erreur dans le calcul de puissance, utiliser une estimation
                 power = self.UAV_data.get('max_power_consumption', 500) * 0.6
             
@@ -888,7 +884,7 @@ class TrajectorySmoothing:
             z_smooth = fz(t_smooth)
             
             return {'X': x_smooth.tolist(), 'Y': y_smooth.tolist(), 'Z': z_smooth.tolist()}
-        except:
+        except Exception:
             # Si l'interpolation échoue, retourner la trajectoire originale
             return trajectory
         
@@ -911,7 +907,7 @@ class TrajectorySmoothing:
             z_smooth = savgol_filter(z_points, window_length, polyorder)
             
             return {'X': x_smooth.tolist(), 'Y': y_smooth.tolist(), 'Z': z_smooth.tolist()}
-        except:
+        except Exception:
             return trajectory
     
     def smooth_dubins_junctions(self, trajectory, num_junction_points=5):

@@ -113,7 +113,7 @@ def lineXline(pA, pB):
     except np.linalg.LinAlgError:
         # Matrice singulière : lignes parallèles
         return np.array([[np.inf], [np.inf], [np.inf]])
-    except Exception as e:
+    except Exception:
         # Toute autre erreur
         return np.array([[np.inf], [np.inf], [np.inf]])
 
@@ -278,7 +278,6 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
         #sin_descent = np.sin(descent_angle)
         current_z = FLT_data[Uidx]['Z']
         delta_z_up = abs(UBz - current_z)
-        delta_z_down = abs(current_z - LBz)
 
         # Pour chaque cap possible
         for i in range(len(H)):
@@ -614,10 +613,10 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
         
         # En cas de solution invalide, conserver la dernière position valide
         if len(FLT_track[Uidx]['X']) > 0:
-            print(f"   ➡️  Conservation dernière position valide")
+            print("   ➡️  Conservation dernière position valide")
             return FLT_track, FLT_conditions, current_wp_idx
         else:
-            print(f"   ❌ Aucune position valide précédente - Erreur critique")
+            print("   ❌ Aucune position valide précédente - Erreur critique")
             return FLT_track, FLT_conditions, current_wp_idx
 
     FLT_track[Uidx]['X'].append(final_x)

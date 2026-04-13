@@ -7,8 +7,8 @@ import asyncio
 import sys
 import numpy as np
 from mavsdk import System
-from mavsdk.offboard import OffboardError, PositionNedYaw, VelocityNedYaw, AttitudeRate
-from mavsdk.telemetry import LandedState, FlightMode
+from mavsdk.offboard import OffboardError, PositionNedYaw, VelocityNedYaw
+from mavsdk.telemetry import FlightMode
 from mavsdk.action import OrbitYawBehavior
 import time
 import pymap3d as pm
@@ -18,7 +18,7 @@ from thermal import ThermalMap, detect_thermal_at_position
 from thermal_ros_bridge import ThermalROSBridge
 from compute import (convert_cylindrical_obstacles_to_polygons, find_nearest_waypoint, 
                      get_sink_rate, calculate_optimal_soaring_parameters)
-from Scenario import (TestScenario, PerformanceMetrics, SurveillanceObject, 
+from Scenario import (TestScenario, PerformanceMetrics,
                       ScenarioGenerator, PerformanceAnalyzer, select_scenario)
 
 
@@ -395,7 +395,7 @@ class PX4SITLBridge:
             print(f"[UAV {self.uav_id}] ❌ Recovery offboard échoué — passage en hold")
             try:
                 await self.drone.action.hold()
-            except:
+            except Exception:
                 pass
         return success
 
@@ -724,9 +724,9 @@ class PX4SITLBridge:
         
         try:
             await self.drone.offboard.stop()
-        except:
+        except Exception:
             pass
-    
+
     async def return_and_land(self):
         """Retour et atterrissage avec vérification RTL"""
         self.is_landing = True
@@ -1354,7 +1354,7 @@ class PX4SITLBridge:
             print(f"[UAV {self.uav_id}] ⚠️  Échec reprise offboard - tentative hold")
             try:
                 await self.drone.action.hold()
-            except:
+            except Exception:
                 pass
         
         return success
@@ -2512,11 +2512,6 @@ async def run_multi_uav_simulation():
         for u, pos in enumerate(home_positions):
             print(f"  UAV {u}: ({pos['X']:.1f}, {pos['Y']:.1f}, {pos['Z']:.1f})")
         
-        # Calculer le centroïde (centre de la zone, maintenant centrée sur home)
-        center_x = 0.0
-        center_y = 0.0
-        center_z = 400.0  # 400m au-dessus
-        
         # ========== ROS2 THERMAL BRIDGE (Gazebo ↔ Algorithm) ==========
         # Start the bridge BEFORE scenario generation so that thermals created
         # by the ROS2 thermal_generator_node (running in Gazebo) are received
@@ -2778,8 +2773,6 @@ async def run_multi_uav_simulation():
             print(f"  UAV {u}: {len(GOAL_WPs[u]['X'])} waypoints")
         
         current_wp_indices = {u: 1 for u in range(nUAVs)}
-        current_eval_wp_indices = {u: 1 for u in range(nUAVs)}
-        current_soar_wp_indices = {u: 1 for u in range(nUAVs)}
         
         # Décoller tous les UAVs
         await controller.arm_and_takeoff_all()
@@ -2825,7 +2818,7 @@ async def run_multi_uav_simulation():
         # Horloge temps réel (pour statistiques seulement)
         real_time_start = time.perf_counter()
         
-        print(f"\n⚙️  Configuration temps réel:")
+        print("\n⚙️  Configuration temps réel:")
         print(f"   Time step cible: {params['time_step']:.2f}s")
         print(f"   Bearing steps - Glide: {params['bearing_step_glide']}, Engine: {params['bearing_step_engine']}")
         print(f"   Speed steps - Glide: {params['speed_step_glide']}, Engine: {params['speed_step_engine']}")
@@ -3479,7 +3472,6 @@ async def run_multi_uav_simulation():
                 avg_algo_time = (total_decision_time / decision_calls) * 1000
                 
                 # Calculer le décalage de synchronisation
-                ideal_real_time = params['current_simulation_time']  # Idéalement 1:1
                 sync_ratio = params['current_simulation_time'] / total_real_time if total_real_time > 0 else 0
                 sync_delay = total_real_time - params['current_simulation_time']
                 
@@ -3773,7 +3765,7 @@ async def run_multi_uav_simulation():
         try:
             await controller.land_all()
             thermal_bridge.stop()
-        except:
+        except Exception:
             pass
 
 

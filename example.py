@@ -3,7 +3,7 @@
 import numpy as np
 from GoToWP import gotoWaypointMulti
 from compute import compute_distance_cartesian
-from trajectory import TrajectoryEvaluator, generate_all_trajectories, generate_random_obstacles, StraightLineTrajectory, fix_trajectory
+from trajectory import TrajectoryEvaluator, generate_all_trajectories, generate_random_obstacles
 from thermal import ThermalGenerator, ThermalMap, ThermalEvaluator
 
 
