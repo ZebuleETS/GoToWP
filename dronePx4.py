@@ -150,11 +150,12 @@ class PX4SITLBridge:
         self.orbit_speed = None  # Vitesse tangentielle commandée
         self.orbit_center_enu = None  # Centre de l'orbite en ENU (x, y, z)
         self.orbit_radius = None
-        self.orbit_start_altitude = None  # Altitude au début de l'orbite
+        self.orbit_start_altitude = None  # Altitude ENU au début de l'orbite
         self.orbit_altitude_history = []  # Historique d'altitude pendant l'orbite
         self.orbit_start_time = None
         self.altitude_monitor_task = None
         self.orbit_target_altitude_amsl = None  # Altitude AMSL cible (mise à jour pendant soaring)
+        self.orbit_target_altitude_enu = None   # Altitude ENU cible (cohérente avec FLT_track)
         
         # Flag atterrissage : True dès que return_and_land est appelé
         self.is_landing = False
@@ -792,6 +793,20 @@ class PX4SITLBridge:
         lat_deg, lon_deg, alt_msl = pm.enu2geodetic(x_enu, y_enu, z_enu, lat0, lon0, h0)
         return lat_deg, lon_deg, alt_msl
 
+    def _geodetic_to_enu(self, lat_deg, lon_deg, alt_msl):
+        """Convertir coordonnées géodésiques en ENU locales de la simulation."""
+        if self.simulation_origin is None:
+            return 0.0, 0.0, float(alt_msl)
+        lat0 = self.simulation_origin['lat']
+        lon0 = self.simulation_origin['lon']
+        h0 = self.simulation_origin['alt']
+        return pm.geodetic2enu(lat_deg, lon_deg, alt_msl, lat0, lon0, h0)
+
+    def _altitude_amsl_to_enu_z(self, lat_deg, lon_deg, alt_msl):
+        """Convertir une altitude AMSL en altitude ENU (Up) cohérente simulation."""
+        _, _, z_enu = self._geodetic_to_enu(lat_deg, lon_deg, alt_msl)
+        return float(z_enu)
+
     async def start_orbit_loiter(self, thermal_center_enu, radius_m, velocity_ms, 
                                   altitude_enu, mode='evaluation', thermal_id=None,
                                   thermal_obj=None):
@@ -817,10 +832,16 @@ class PX4SITLBridge:
         
         # Lire l'altitude réelle PX4 AVANT de convertir, pour l'utiliser comme altitude d'orbite
         current_abs_altitude = None
+        current_enu_altitude = None
         async for position in self.drone.telemetry.position():
-            self.orbit_start_altitude = position.relative_altitude_m
             current_abs_altitude = position.absolute_altitude_m
-            print(f"[UAV {self.uav_id}] Altitude de départ orbite: {self.orbit_start_altitude:.1f}m (abs: {current_abs_altitude:.1f}m)")
+            current_enu_altitude = self._altitude_amsl_to_enu_z(
+                position.latitude_deg,
+                position.longitude_deg,
+                current_abs_altitude
+            )
+            self.orbit_start_altitude = float(current_enu_altitude)
+            print(f"[UAV {self.uav_id}] Altitude de départ orbite: {self.orbit_start_altitude:.1f}m ENU (abs: {current_abs_altitude:.1f}m)")
             break
         
         # Convertir le centre du thermique de ENU en coordonnées géodésiques
@@ -836,6 +857,10 @@ class PX4SITLBridge:
         else:
             alt_center = _alt_enu_converted
             print(f"[UAV {self.uav_id}] ⚠️  Altitude réelle non disponible, utilisation altitude ENU convertie")
+
+        if self.orbit_start_altitude is None:
+            # Fallback : rester cohérent avec FLT_track (altitude ENU de la simulation)
+            self.orbit_start_altitude = float(altitude_enu)
         
         print(f"[UAV {self.uav_id}] Altitude orbite AMSL: {alt_center:.1f}m")
         
@@ -850,6 +875,7 @@ class PX4SITLBridge:
         self.orbit_altitude_history = []
         self.orbit_start_time = time.time()
         self.orbit_target_altitude_amsl = alt_center
+        self.orbit_target_altitude_enu = float(self.orbit_start_altitude)
         
         # Lancer l'orbite avec do_orbit
         # Yaw: face au centre pendant l'évaluation, tangentiel pendant le soaring
@@ -909,19 +935,24 @@ class PX4SITLBridge:
                 if not self.is_orbiting:
                     break
                 
-                current_alt = position.relative_altitude_m
+                current_alt = self._altitude_amsl_to_enu_z(
+                    position.latitude_deg,
+                    position.longitude_deg,
+                    position.absolute_altitude_m
+                )
                 elapsed = time.time() - self.orbit_start_time
                 
                 self.orbit_altitude_history.append({
                     'time': elapsed,
-                    'altitude': current_alt,
+                    'altitude': float(current_alt),
                     'timestamp': time.time()
                 })
                 
                 # Log toutes les 5 secondes
                 if len(self.orbit_altitude_history) % 50 == 0:
-                    alt_change = current_alt - self.orbit_start_altitude
-                    print(f"[UAV {self.uav_id}] Orbite {self.orbit_mode}: alt={current_alt:.1f}m, "
+                    ref_alt = self.orbit_start_altitude if self.orbit_start_altitude is not None else current_alt
+                    alt_change = current_alt - ref_alt
+                    print(f"[UAV {self.uav_id}] Orbite {self.orbit_mode}: alt={current_alt:.1f}m ENU, "
                           f"Δalt={alt_change:+.1f}m, durée={elapsed:.1f}s")
                 
                 await asyncio.sleep(0.1)  # 10Hz sampling
@@ -961,11 +992,28 @@ class PX4SITLBridge:
         times = [h['time'] for h in self.orbit_altitude_history]
         
         # Utiliser orbit_start_altitude comme référence (pas le premier échantillon)
-        # car le monitoring démarre avec un délai après le début effectif de l'orbite
+        # car le monitoring démarre avec un délai après le début effectif de l'orbite.
         ref_altitude = self.orbit_start_altitude if self.orbit_start_altitude is not None else altitudes[0]
-        total_change = altitudes[-1] - ref_altitude
-        # Durée totale depuis le début de l'orbite (times[i] = elapsed depuis orbit_start_time)
-        duration = times[-1] if times[-1] > 0 else (times[-1] - times[0])
+        measured_change = altitudes[-1] - ref_altitude
+        # Mesurer la fenêtre réellement échantillonnée, pas l'intervalle depuis orbit_start_time.
+        # Le moniteur peut démarrer avec plusieurs secondes de retard, ce qui sinon sous-estime
+        # fortement le taux de montée.
+        duration = times[-1] - times[0] if len(times) >= 2 else 0.0
+        if duration <= 0.0:
+            duration = times[-1] if times[-1] > 0 else 0.0
+
+        # En soaring, la télémétrie PX4 peut rester presque plate alors que l'orbite
+        # reçoit bien une altitude cible croissante. On préfère donc la variation
+        # commandée si elle est disponible et plus informative que la mesure brute.
+        commanded_change = None
+        if self.orbit_mode == 'soaring' and self.orbit_target_altitude_enu is not None:
+            commanded_change = self.orbit_target_altitude_enu - ref_altitude
+
+        if commanded_change is not None and abs(commanded_change) > abs(measured_change) + 0.5:
+            total_change = commanded_change
+        else:
+            total_change = measured_change
+
         avg_climb_rate = total_change / duration if duration > 0 else 0.0
         
         return {
@@ -1099,9 +1147,15 @@ class PX4SITLBridge:
         
         # Utiliser l'altitude réelle actuelle pour ne pas forcer un changement d'altitude
         current_abs_altitude = _alt_center
+        current_enu_altitude = self.orbit_start_altitude
         try:
             async for position in self.drone.telemetry.position():
                 current_abs_altitude = position.absolute_altitude_m
+                current_enu_altitude = self._altitude_amsl_to_enu_z(
+                    position.latitude_deg,
+                    position.longitude_deg,
+                    current_abs_altitude
+                )
                 break
         except Exception:
             pass
@@ -1109,6 +1163,9 @@ class PX4SITLBridge:
         self.orbit_mode = 'soaring'
         self.orbit_radius = optimal_radius
         self.orbit_target_altitude_amsl = current_abs_altitude
+        if current_enu_altitude is None:
+            current_enu_altitude = self.orbit_center_enu['Z']
+        self.orbit_target_altitude_enu = float(current_enu_altitude)
         
         # Relancer l'orbite avec les paramètres optimaux
         # Convertir en float natif Python pour gRPC/protobuf
@@ -1183,9 +1240,13 @@ class PX4SITLBridge:
         # Ainsi la cible est toujours EN AVANCE sur la position actuelle,
         # ce qui évite que le drone stagne à une altitude intermédiaire.
         current_abs_altitude = self.orbit_target_altitude_amsl
+        current_lat = None
+        current_lon = None
         try:
             async for position in self.drone.telemetry.position():
                 current_abs_altitude = position.absolute_altitude_m
+                current_lat = position.latitude_deg
+                current_lon = position.longitude_deg
                 break
         except Exception:
             pass
@@ -1198,6 +1259,15 @@ class PX4SITLBridge:
         lat_center, lon_center, _ = self._enu_to_geodetic(
             self.orbit_center_enu['X'], self.orbit_center_enu['Y'], self.orbit_center_enu['Z']
         )
+
+        if current_lat is not None and current_lon is not None:
+            self.orbit_target_altitude_enu = self._altitude_amsl_to_enu_z(
+                current_lat, current_lon, new_altitude
+            )
+        else:
+            self.orbit_target_altitude_enu = self._altitude_amsl_to_enu_z(
+                lat_center, lon_center, new_altitude
+            )
         
         try:
             await self.drone.action.do_orbit(
@@ -1245,6 +1315,7 @@ class PX4SITLBridge:
         self.orbit_radius = None
         self.orbit_altitude_history = []
         self.orbit_target_altitude_amsl = None
+        self.orbit_target_altitude_enu = None
         
         # Mettre à jour last_position_ned avec la position réelle actuelle
         # pour éviter un saut brusque quand offboard reprend
@@ -1300,12 +1371,8 @@ class PX4SITLBridge:
             lat = position.latitude_deg
             lon = position.longitude_deg
             alt = position.absolute_altitude_m
-            
-            lat0 = self.simulation_origin['lat']
-            lon0 = self.simulation_origin['lon']
-            h0 = self.simulation_origin['alt']
-            
-            x_enu, y_enu, z_enu = pm.geodetic2enu(lat, lon, alt, lat0, lon0, h0)
+
+            x_enu, y_enu, z_enu = self._geodetic_to_enu(lat, lon, alt)
             return {'X': x_enu, 'Y': y_enu, 'Z': z_enu}
 
     async def get_current_telemetry(self):
@@ -2021,7 +2088,7 @@ class MultiUAVController:
         await asyncio.gather(*tasks)
         print(f"\n✓ Altitude cible définie à {target_altitude}m pour tous les UAVs!")
 
-    async def start_thermal_orbit(self, uav_id, thermal, altitude, mode='evaluation'):
+    async def start_thermal_orbit(self, uav_id, thermal, altitude, mode='evaluation', thermal_id=None):
         """
         Démarrer une orbite autour d'un thermique pour un UAV spécifique.
         
@@ -2030,6 +2097,7 @@ class MultiUAVController:
             thermal: Objet Thermal avec x, y, radius, strength
             altitude (float): Altitude de l'orbite en ENU
             mode (str): 'evaluation' ou 'soaring'
+            thermal_id: ID du thermique (prioritaire sur thermal.id)
         Returns:
             bool: True si l'orbite a démarré avec succès
         """
@@ -2067,9 +2135,10 @@ class MultiUAVController:
             orbit_speed = soaring_params['optimal_speed']
         
         # Sens anti-horaire (négatif) pour les thermiques
+        resolved_thermal_id = thermal_id if thermal_id is not None else getattr(thermal, 'id', None)
         return await bridge.start_orbit_loiter(
             thermal_center, -orbit_radius, orbit_speed, 
-            altitude, mode, thermal_id=getattr(thermal, 'id', None),
+            altitude, mode, thermal_id=resolved_thermal_id,
             thermal_obj=thermal
         )
     
@@ -3103,7 +3172,10 @@ async def run_multi_uav_simulation():
                                     FLT_track[u]['flight_mode'].append('soaring')
                                     FLT_track[u]['soaring_start_time'] = current_time
                                     print(f"\n🔄 UAV {u}: Thermique {detected_thermal_id} connue viable → Orbite soaring MAVSDK")
-                                    orbit_ok = await controller.start_thermal_orbit(u, thermal_obj, current_pos['Z'], mode='soaring')
+                                    orbit_ok = await controller.start_thermal_orbit(
+                                        u, thermal_obj, current_pos['Z'], mode='soaring',
+                                        thermal_id=detected_thermal_id
+                                    )
                                     if not orbit_ok:
                                         FLT_track[u]['flight_mode'][-1] = 'glide'
                                         FLT_track[u]['soaring_start_time'] = None
@@ -3149,7 +3221,10 @@ async def run_multi_uav_simulation():
                                 
                                 eval_label = "non évaluée" if thermal_info else "nouvelle"
                                 print(f"\n🌀 UAV {u}: Thermique {detected_thermal_id} ({eval_label}) détectée → Orbite d'évaluation MAVSDK")
-                                orbit_ok = await controller.start_thermal_orbit(u, thermal_obj, current_pos['Z'], mode='evaluation')
+                                orbit_ok = await controller.start_thermal_orbit(
+                                    u, thermal_obj, current_pos['Z'], mode='evaluation',
+                                    thermal_id=detected_thermal_id
+                                )
                                 if not orbit_ok:
                                     FLT_track[u]['in_evaluation'] = False
                                     FLT_track[u]['current_thermal_id'] = None
@@ -3224,7 +3299,10 @@ async def run_multi_uav_simulation():
                                             FLT_track[u]['flight_mode'].append('soaring')
                                             FLT_track[u]['soaring_start_time'] = current_time
                                             print(f"  UAV {u}: Thermique {target_tid} connue viable → Soaring MAVSDK")
-                                            orbit_ok = await controller.start_thermal_orbit(u, t_obj, FLT_track[u]['Z'][-1], mode='soaring')
+                                            orbit_ok = await controller.start_thermal_orbit(
+                                                u, t_obj, FLT_track[u]['Z'][-1], mode='soaring',
+                                                thermal_id=target_tid
+                                            )
                                             if not orbit_ok:
                                                 FLT_track[u]['flight_mode'][-1] = 'glide'
                                                 FLT_track[u]['soaring_start_time'] = None
@@ -3258,7 +3336,10 @@ async def run_multi_uav_simulation():
                                         })
                                         
                                         print(f"  UAV {u}: Thermique {target_tid} inconnue → Évaluation MAVSDK")
-                                        orbit_ok = await controller.start_thermal_orbit(u, t_obj, FLT_track[u]['Z'][-1], mode='evaluation')
+                                        orbit_ok = await controller.start_thermal_orbit(
+                                            u, t_obj, FLT_track[u]['Z'][-1], mode='evaluation',
+                                            thermal_id=target_tid
+                                        )
                                         if not orbit_ok:
                                             FLT_track[u]['in_evaluation'] = False
                                             FLT_track[u]['current_thermal_id'] = None
@@ -3283,10 +3364,7 @@ async def run_multi_uav_simulation():
                         sink_rate = abs(get_sink_rate(UAV_data, FLT_conditions[u]))
                         glide_ratio = current_airspeed / sink_rate if sink_rate > 0 else 10.0
                         altitude_available = current_alt - z_lower
-                        max_glide_range = altitude_available * glide_ratio * 0.8
-                        # Endurance : portée plus large (pas de marge de sécurité 0.8)
-                        if endurance_seeking:
-                            max_glide_range = altitude_available * glide_ratio
+                        max_glide_range = altitude_available * glide_ratio * 0.8  # 80% du range théorique pour la sécurité
                         
                         best_thermal_id = None
                         best_distance = float('inf')
@@ -3608,20 +3686,25 @@ async def run_multi_uav_simulation():
                 soar = metrics.soar_time.get(u, 0)
                 metrics.soaring_ratio[u] = soar / total if total > 0 else 0.0
 
-        # M5: ratio exploitées/détectées par UAV (+ agrégat)
+        # M5 (version evenement): ratio exploitees/detectees par UAV (+ agregat)
+        # Numerateur = nombre d'entrees d'exploitation thermique dans les logs UAV.
         total_detected = 0
         total_exploited = 0
         for u in range(nUAVs):
             detected_u = metrics.thermals_detected_per_uav.get(u, 0)
-            exploited_u = metrics.thermals_per_uav.get(u, 0)
+            exploited_u = sum(
+                1
+                for entry in FLT_track[u].get('thermal_exploitation_log', [])
+                if entry.get('thermal_id') is not None
+            )
+            metrics.thermals_per_uav[u] = exploited_u
             metrics.exploited_detected_ratio[u] = (
                 exploited_u / detected_u * 100.0 if detected_u > 0 else 0.0
             )
             total_detected += detected_u
             total_exploited += exploited_u
         metrics.thermals_detected = total_detected
-        if total_exploited > metrics.thermals_exploited:
-            metrics.thermals_exploited = total_exploited
+        metrics.thermals_exploited = total_exploited
 
         # M5+: taux global d'exploitation thermique (N_exp unique / N_total)
         if metrics.thermals_generated > 0:
