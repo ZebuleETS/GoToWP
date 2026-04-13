@@ -18,32 +18,6 @@ import copy
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
-#not used
-def update_remaining_energy(flight_conditions, power_consumption, time_step):
-    """
-    Updates the remaining battery energy after a given flight duration.
-
-    Args:
-        flight_conditions (dict): Dictionary of current flight conditions.
-        power_consumption (float): Power consumption (W).
-        time_step (float or list): Flight duration(s) (s).
-
-    Returns:
-        list: List of remaining energy (Wh) after each time step.
-    """
-    remaining_energy = []
-
-    if isinstance(time_step, float):
-        time_step = [time_step]
-
-    n = len(time_step)
-
-    for i in range(n):
-        energy_cost = power_consumption * (time_step[i] / 3600)
-        remaining_energy.append(flight_conditions['battery_capacity'] - energy_cost)
-
-    return remaining_energy
-
 def lineXline(pA, pB):
     """
     Calculates the intersection point between two lines in 3D space.

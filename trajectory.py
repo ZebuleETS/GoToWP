@@ -7,8 +7,6 @@ from compute import (
     get_power_consumption,
 )
 from typing import Dict, List
-from scipy import interpolate
-from scipy.signal import savgol_filter
 
 class TrajectoryGenerator(ABC):
     """Abstract base class for trajectory generators"""
@@ -854,86 +852,6 @@ class TrajectoryEvaluator:
         return score
     
     
-
-class TrajectorySmoothing:
-    """
-    Classe fournissant des méthodes pour lisser les trajectoires générées.
-    """
-    
-    def __init__(self, params=None):
-        self.params = params if params is not None else {}
-        
-    def smooth_trajectory_spline(self, trajectory):
-        """Lissage par spline"""
-        x_points = np.array(trajectory['X'])
-        y_points = np.array(trajectory['Y'])
-        z_points = np.array(trajectory['Z'])
-        
-        # Paramètres pour la spline
-        t = np.linspace(0, 1, len(x_points))
-        t_smooth = np.linspace(0, 1, len(x_points))
-        
-        try:
-            # Interpolation spline
-            fx = interpolate.interp1d(t, x_points, kind='cubic')
-            fy = interpolate.interp1d(t, y_points, kind='cubic')
-            fz = interpolate.interp1d(t, z_points, kind='cubic')
-            
-            x_smooth = fx(t_smooth)
-            y_smooth = fy(t_smooth)
-            z_smooth = fz(t_smooth)
-            
-            return {'X': x_smooth.tolist(), 'Y': y_smooth.tolist(), 'Z': z_smooth.tolist()}
-        except Exception:
-            # Si l'interpolation échoue, retourner la trajectoire originale
-            return trajectory
-        
-    def smooth_trajectory_savgol(self, trajectory):
-        """Lissage par filtre Savitzky-Golay"""
-        try:
-            x_points = np.array(trajectory['X'])
-            y_points = np.array(trajectory['Y'])
-            z_points = np.array(trajectory['Z'])
-            
-            # Paramètres du filtre
-            window_length = min(11, len(x_points) if len(x_points) % 2 == 1 else len(x_points) - 1)
-            if window_length < 3:
-                return trajectory
-                
-            polyorder = min(3, window_length - 1)
-            
-            x_smooth = savgol_filter(x_points, window_length, polyorder)
-            y_smooth = savgol_filter(y_points, window_length, polyorder)
-            z_smooth = savgol_filter(z_points, window_length, polyorder)
-            
-            return {'X': x_smooth.tolist(), 'Y': y_smooth.tolist(), 'Z': z_smooth.tolist()}
-        except Exception:
-            return trajectory
-    
-    def smooth_dubins_junctions(self, trajectory, num_junction_points=5):
-        """Lissage spécifique pour les jonctions Dubins"""
-        return self.smooth_trajectory_spline(trajectory)
-        
-    def smooth_trajectory(self, trajectory, method='spline'):
-        """
-        Applique le lissage selon la méthode spécifiée
-        
-        Args:
-            trajectory: Trajectoire à lisser
-            method: Méthode de lissage ('spline', 'savgol', 'dubins_junctions')
-            
-        Returns:
-            Dict: Trajectoire lissée
-        """
-        if method == 'spline':
-            return self.smooth_trajectory_spline(trajectory)
-        elif method == 'savgol':
-            return self.smooth_trajectory_savgol(trajectory)
-        elif method == 'dubins_junctions':
-            return self.smooth_dubins_junctions(trajectory)
-        else:
-            return trajectory
-
 
 def fix_trajectory(trajectory, obstacles):
     """

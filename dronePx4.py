@@ -2003,17 +2003,8 @@ class MultiUAVController:
         
         if update_tasks:
             await asyncio.gather(*update_tasks)
-    
-    async def recover_rtl_all(self):
-        """Vérifier et récupérer le mode RTL pour tous les UAVs qui l'ont perdu.
-        
-        Même logique que recover_offboard_all, adaptée au RTL.
-        """
-        for u in range(self.nUAVs):
-            if u >= len(self.bridges):
-                continue
-            await self.bridges[u].check_and_recover_rtl()
 
+    
     async def land_all(self):
         """Atterrir tous les UAVs avec vérification RTL"""
         print("\n" + "="*70)
@@ -2075,19 +2066,6 @@ class MultiUAVController:
         
         print("\n✓ Tous les UAVs ont atterri!")
         
-    async def set_altitude_all(self, target_altitude):
-        """Définir l'altitude cible pour tous les UAVs"""
-        print(f"\nDéfinition de l'altitude cible à {target_altitude}m pour tous les UAVs...")
-        tasks = []
-        for u in range(self.nUAVs):
-            tasks.append(asyncio.create_task(self.bridges[u].drone.action.do_orbit(
-                100, 15, OrbitYawBehavior.HOLD_FRONT_TANGENT_TO_CIRCLE,
-                self.bridges[u].home_position.latitude_deg, 
-                self.bridges[u].home_position.longitude_deg, target_altitude
-            )))
-        await asyncio.gather(*tasks)
-        print(f"\n✓ Altitude cible définie à {target_altitude}m pour tous les UAVs!")
-
     async def start_thermal_orbit(self, uav_id, thermal, altitude, mode='evaluation', thermal_id=None):
         """
         Démarrer une orbite autour d'un thermique pour un UAV spécifique.
@@ -2776,8 +2754,6 @@ async def run_multi_uav_simulation():
         
         # Décoller tous les UAVs
         await controller.arm_and_takeoff_all()
-        
-        #await controller.set_altitude_all(400.0)
 
         # Pour les scénarios de trajectoire optimale, rapprocher physiquement
         # les drones du premier waypoint avant de démarrer la simulation.

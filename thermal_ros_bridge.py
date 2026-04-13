@@ -238,7 +238,3 @@ class ThermalROSBridge:
             time.sleep(0.5)
         return False
 
-    def set_origin(self, lat: float, lon: float):
-        """Update the ENU origin (call after getting shared drone home)."""
-        self.origin_lat = lat
-        self.origin_lon = lon
