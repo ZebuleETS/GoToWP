@@ -36,9 +36,10 @@ class PerformanceMetrics:
     collisions_avoided: int = 0
     min_separation_distance: float = float('inf')
     
-    # Métriques d'énergie
+    # Métriques d'énergie batterie (Wh)
     battery_consumed: Dict[int, float] = field(default_factory=dict)
     battery_remaining: Dict[int, float] = field(default_factory=dict)
+    battery_nominal_voltage_v: float = 0.0
     
     # Métriques de temps
     total_flight_time: Dict[int, float] = field(default_factory=dict)
@@ -59,7 +60,7 @@ class PerformanceMetrics:
 
     # Métriques complémentaires (M1..M7)
     motor_off_ratio: Dict[int, float] = field(default_factory=dict)  # (glide+soar)/total en %
-    battery_consumption_rate_ah_per_h: Dict[int, float] = field(default_factory=dict)
+    battery_consumption_rate_wh_per_h: Dict[int, float] = field(default_factory=dict)
     potential_energy_j: Dict[int, Dict[str, float]] = field(default_factory=dict)
     thermals_detected_per_uav: Dict[int, int] = field(default_factory=dict)
     exploited_detected_ratio: Dict[int, float] = field(default_factory=dict)
@@ -96,9 +97,9 @@ class SurveillanceObject:
         """Vérifie si l'objet est actif"""
         return self.spawn_time <= current_time <= self.despawn_time
     
-    def is_in_fov(self, uav_x: float, uav_y: float, uav_z: float, fov_radius: float) -> bool:
+    def is_in_fov(self, uav_x: float, uav_y: float, fov_radius: float) -> bool:
         """Vérifie si l'objet est dans le champ de vision"""
-        distance = np.sqrt((self.x - uav_x)**2 + (self.y - uav_y)**2 + (self.z - uav_z)**2)
+        distance = np.sqrt((self.x - uav_x)**2 + (self.y - uav_y)**2)
         return distance <= fov_radius
 
 
@@ -233,26 +234,68 @@ class ScenarioGenerator:
         print("GÉNÉRATION SCÉNARIO: Test de Couverture")
         print("="*70)
         
-        # Générer objets de surveillance
-        num_objects = np.random.randint(15, 30)
+        # Générer davantage d'objets avec fort chevauchement temporel
+        # pour augmenter le nombre d'objets actifs en simultané.
+        num_min = int(params.get('coverage_num_objects_min', 35))
+        num_max = int(params.get('coverage_num_objects_max', 55))
+        if num_max <= num_min:
+            num_max = num_min + 1
+        num_objects = np.random.randint(num_min, num_max)
+
+        # Les apparitions sont concentrées dans une fenêtre plus courte.
+        spawn_window_ratio = float(params.get('coverage_spawn_window_ratio', 0.85))
+        spawn_window_ratio = max(0.05, min(1.0, spawn_window_ratio))
+        spawn_window = mission_duration * spawn_window_ratio
+
+        # Une partie des objets apparaît tôt et reste active longtemps.
+        hot_start_ratio = float(params.get('coverage_hot_start_ratio', 0.30))
+        hot_start_ratio = max(0.0, min(1.0, hot_start_ratio))
+        hot_start_count = int(num_objects * hot_start_ratio)
+        hot_start_window = mission_duration * 0.08
+
+        lifetime_min = float(params.get('coverage_lifetime_min_s', 700.0))
+        lifetime_max = float(params.get('coverage_lifetime_max_s', 1400.0))
+        if lifetime_max < lifetime_min:
+            lifetime_max = lifetime_min
+
         objects = []
+        events = []
         
         for i in range(num_objects):
-            spawn_time = np.random.uniform(0, mission_duration * 0.7)
-            lifetime = np.random.uniform(60, 300)  # 1-5 min
+            if i < hot_start_count:
+                spawn_time = np.random.uniform(0, hot_start_window)
+                lifetime = np.random.uniform(lifetime_min * 1.2, lifetime_max * 1.5)
+            else:
+                spawn_time = np.random.uniform(0, spawn_window)
+                lifetime = np.random.uniform(lifetime_min, lifetime_max)
+
+            despawn_time = spawn_time + lifetime
             
             obj = SurveillanceObject(
                 id=i,
-                x=np.random.uniform(params['X_lower_bound'], params['X_upper_bound']),
-                y=np.random.uniform(params['Y_lower_bound'], params['Y_upper_bound']),
-                z=np.random.uniform(300, 600),
+                x=np.random.uniform(-1500, 1500),
+                y=np.random.uniform(-1500, 1500),
+                z=0,
                 spawn_time=spawn_time,
-                despawn_time=spawn_time + lifetime
+                despawn_time=despawn_time
             )
             objects.append(obj)
+
+            events.append((spawn_time, 1))
+            events.append((despawn_time, -1))
+
+        # Estimation simple du pic d'objets actifs simultanément.
+        active_count = 0
+        peak_active = 0
+        for _, delta in sorted(events, key=lambda e: (e[0], -e[1])):
+            active_count += delta
+            peak_active = max(peak_active, active_count)
         
         print(f"✓ {num_objects} objets de surveillance générés")
-        print(f"✓ Durée de vie: 1-5 min")
+        print(f"✓ Fenêtre d'apparition: 0-{spawn_window:.0f}s ({spawn_window_ratio*100:.0f}% mission)")
+        print(f"✓ Durée de vie: {lifetime_min/60:.1f}-{lifetime_max/60:.1f} min")
+        print(f"✓ Objets early persistants: {hot_start_count}")
+        print(f"✓ Pic estimé objets actifs simultanés: {peak_active}")
         print(f"✓ Distribution spatiale: aléatoire")
         print(f"✓ Champ de vision UAV: 150m")
         
@@ -268,15 +311,21 @@ class PerformanceAnalyzer:
         phase_times = {}
         
         for u in range(nUAVs):
-            glide_time = 0
-            soar_time = 0
-            engine_time = 0
-            
-            if len(FLT_track[u]['flight_mode']) > 1:
-                for i in range(1, len(FLT_track[u]['flight_mode'])):
-                    time_step = FLT_track[u]['flight_time'][i] - FLT_track[u]['flight_time'][i-1]
-                    mode = FLT_track[u]['flight_mode'][i]
-                    
+            glide_time = 0.0
+            soar_time = 0.0
+            engine_time = 0.0
+
+            flight_time = FLT_track[u].get('flight_time', [])
+            flight_mode = FLT_track[u].get('flight_mode', [])
+
+            # Aligner sur la plus petite longueur évite les index out of range
+            # quand un changement de mode est journalisé sans nouvel échantillon temps.
+            samples = min(len(flight_time), len(flight_mode))
+            if samples > 1:
+                for i in range(1, samples):
+                    time_step = max(0.0, flight_time[i] - flight_time[i - 1])
+                    mode = flight_mode[i]
+
                     if mode == 'glide':
                         glide_time += time_step
                     elif mode == 'soaring':
@@ -288,7 +337,7 @@ class PerformanceAnalyzer:
                 'glide': glide_time,
                 'soar': soar_time,
                 'engine': engine_time,
-                'total': FLT_track[u]['flight_time'][-1] if len(FLT_track[u]['flight_time']) > 0 else 0
+                'total': flight_time[-1] if len(flight_time) > 0 else 0
             }
         
         return phase_times
@@ -484,7 +533,7 @@ class PerformanceAnalyzer:
                     
                     # Vérifier si dans le champ de vision
                     if obj.is_in_fov(FLT_track[u]['X'][i], FLT_track[u]['Y'][i], 
-                                    FLT_track[u]['Z'][i], fov_radius):
+                                    fov_radius):
                         if not obj.detected:
                             obj.detected = True
                         if u not in obj.detected_by:
@@ -511,6 +560,7 @@ class PerformanceAnalyzer:
         print("="*70)
         
         print(f"\nNombre d'UAVs: {metrics.num_uavs}")
+        battery_voltage_v = metrics.battery_nominal_voltage_v
         
         # Métriques de trajectoire
         if metrics.total_distance:
@@ -519,8 +569,16 @@ class PerformanceAnalyzer:
                 print(f"UAV {u}:")
                 print(f"  Distance totale: {metrics.total_distance.get(u, 0):.1f}m")
                 print(f"  M9 L_path: {metrics.total_distance.get(u, 0):.1f}m")
-                print(f"  Batterie résiduelle: {metrics.battery_remaining.get(u, 0):.2f}")
-                print(f"  Batterie consommée: {metrics.battery_consumed.get(u, 0):.2f}")
+                battery_remaining_wh = metrics.battery_remaining.get(u, 0.0)
+                battery_consumed_wh = metrics.battery_consumed.get(u, 0.0)
+                if battery_voltage_v > 0.0:
+                    battery_remaining_mah = (battery_remaining_wh / battery_voltage_v) * 1000.0
+                    battery_consumed_mah = (battery_consumed_wh / battery_voltage_v) * 1000.0
+                    print(f"  Batterie résiduelle: {battery_remaining_wh:.2f} Wh ({battery_remaining_mah:.0f} mAh)")
+                    print(f"  Batterie consommée: {battery_consumed_wh:.2f} Wh ({battery_consumed_mah:.0f} mAh)")
+                else:
+                    print(f"  Batterie résiduelle: {battery_remaining_wh:.2f} Wh")
+                    print(f"  Batterie consommée: {battery_consumed_wh:.2f} Wh")
             print(f"\nM8a Distance min séparation d_min: {metrics.min_separation_distance:.1f}m")
             print(f"M8b Collisions inter-agents évitées N_coll: {metrics.collisions_avoided}")
         
@@ -540,9 +598,13 @@ class PerformanceAnalyzer:
                     print(f"  Soar: {soar:.1f}s ({soar/total*100:.1f}%)")
                     print(f"  Engine: {engine:.1f}s ({engine/total*100:.1f}%)")
                     motor_off = metrics.motor_off_ratio.get(u, (glide + soar) / total * 100)
-                    rate = metrics.battery_consumption_rate_ah_per_h.get(u, 0.0)
+                    rate_wh = metrics.battery_consumption_rate_wh_per_h.get(u, 0.0)
                     print(f"  M1 Ratio moteur OFF: {motor_off:.1f}%")
-                    print(f"  M2 Taux conso batterie: {rate:.3f} Ah/h")
+                    if battery_voltage_v > 0.0:
+                        rate_mah = (rate_wh / battery_voltage_v) * 1000.0
+                        print(f"  M2 Taux conso batterie: {rate_wh:.3f} Wh/h ({rate_mah:.1f} mAh/h)")
+                    else:
+                        print(f"  M2 Taux conso batterie: {rate_wh:.3f} Wh/h")
                 pe = metrics.potential_energy_j.get(
                     u,
                     {
@@ -603,7 +665,11 @@ class PerformanceAnalyzer:
                 print(f"  Temps de vol total: {total:.0f}s ({total/60:.1f}min)")
                 print(f"  Ratio soaring: {ratio*100:.1f}%")
                 print(f"  Répartition: glide {glide:.0f}s | soar {soar:.0f}s | engine {engine:.0f}s")
-                print(f"  Batterie restante: {bat:.2f}")
+                if battery_voltage_v > 0.0:
+                    bat_mah = (bat / battery_voltage_v) * 1000.0
+                    print(f"  Batterie restante: {bat:.2f} Wh ({bat_mah:.0f} mAh)")
+                else:
+                    print(f"  Batterie restante: {bat:.2f} Wh")
         
         # Métriques de couverture
         if metrics.objects_total > 0:
@@ -627,11 +693,24 @@ class PerformanceAnalyzer:
     @staticmethod
     def save_metrics_to_file(metrics: PerformanceMetrics, filename: str):
         """Sauvegarder les métriques dans un fichier JSON"""
-        log_dir = '/home/pix4/GoToWP/log'
+        log_dir = os.path.join(os.path.expanduser('~'), 'GoToWP', 'log')
         os.makedirs(log_dir, exist_ok=True)
         
         # Construire le chemin complet
         filepath = os.path.join(log_dir, filename)
+
+        battery_voltage_v = metrics.battery_nominal_voltage_v
+        battery_consumed_mah = {}
+        battery_remaining_mah = {}
+        battery_rate_mah_per_h = {}
+        if battery_voltage_v > 0.0:
+            for u in range(metrics.num_uavs):
+                consumed_wh = metrics.battery_consumed.get(u, 0.0)
+                remaining_wh = metrics.battery_remaining.get(u, 0.0)
+                rate_wh = metrics.battery_consumption_rate_wh_per_h.get(u, 0.0)
+                battery_consumed_mah[u] = (consumed_wh / battery_voltage_v) * 1000.0
+                battery_remaining_mah[u] = (remaining_wh / battery_voltage_v) * 1000.0
+                battery_rate_mah_per_h[u] = (rate_wh / battery_voltage_v) * 1000.0
         
         data = {
             'scenario_name': metrics.scenario_name,
@@ -640,14 +719,18 @@ class PerformanceAnalyzer:
             'path_length': metrics.path_length,
             'collisions_avoided': metrics.collisions_avoided,
             'min_separation_distance': metrics.min_separation_distance,
-            'battery_consumed': metrics.battery_consumed,
-            'battery_remaining': metrics.battery_remaining,
+            'battery_nominal_voltage_v': battery_voltage_v,
+            'battery_consumed_wh': metrics.battery_consumed,
+            'battery_remaining_wh': metrics.battery_remaining,
+            'battery_consumed_mah': battery_consumed_mah,
+            'battery_remaining_mah': battery_remaining_mah,
             'total_flight_time': metrics.total_flight_time,
             'glide_time': metrics.glide_time,
             'soar_time': metrics.soar_time,
             'engine_time': metrics.engine_time,
             'motor_off_ratio': metrics.motor_off_ratio,
-            'battery_consumption_rate_ah_per_h': metrics.battery_consumption_rate_ah_per_h,
+            'battery_consumption_rate_wh_per_h': metrics.battery_consumption_rate_wh_per_h,
+            'battery_consumption_rate_mah_per_h': battery_rate_mah_per_h,
             'potential_energy_j': metrics.potential_energy_j,
             'thermals_generated': metrics.thermals_generated,
             'thermals_detected': metrics.thermals_detected,
@@ -678,26 +761,29 @@ class PerformanceAnalyzer:
     @staticmethod
     def save_metrics_to_csv(metrics: PerformanceMetrics, filename: str):
         """Sauvegarder les métriques dans un CSV plat dans le dossier log."""
-        log_dir = '/home/pix4/GoToWP/log'
+        log_dir = os.path.join(os.path.expanduser('~'), 'GoToWP', 'log')
         os.makedirs(log_dir, exist_ok=True)
         filepath = os.path.join(log_dir, filename)
 
         fieldnames = [
             'scenario_name', 'num_uavs', 'uav_id', 'total_distance_m', 'path_length_points',
             'flight_time_s', 'glide_time_s', 'soar_time_s', 'engine_time_s',
-            'motor_off_ratio_pct', 'battery_consumed_ah', 'battery_remaining_ah',
-            'battery_rate_ah_per_h',
+            'motor_off_ratio_pct', 'battery_consumed_wh', 'battery_remaining_wh',
+            'battery_rate_wh_per_h', 'battery_consumed_mah', 'battery_remaining_mah',
+            'battery_rate_mah_per_h',
             'potential_energy_variation_j', 'potential_energy_thermal_gain_j',
             'potential_energy_engine_gain_j', 'potential_energy_gain_j', 'potential_energy_loss_j',
             'thermals_detected_uav', 'thermals_exploited_uav', 'exploited_detected_ratio_pct',
             'patrol_loops', 'soaring_ratio_pct',
-            'd_min_m', 'n_coll', 'eta_cov_pct', 't_algo_avg_ms', 't_algo_max_ms',
+            'd_min_m', 'n_coll', 'objects_total', 'objects_detected', 'objects_detected_uav',
+            'eta_cov_pct', 't_algo_avg_ms', 't_algo_max_ms',
             'eta_exp_global_pct', 'n_exp_unique', 'n_total_thermals'
         ]
 
         with open(filepath, 'w', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
+            battery_voltage_v = metrics.battery_nominal_voltage_v
             for u in range(metrics.num_uavs):
                 pe = metrics.potential_energy_j.get(
                     u,
@@ -709,6 +795,17 @@ class PerformanceAnalyzer:
                         'loss_J': 0.0,
                     },
                 )
+                consumed_wh = metrics.battery_consumed.get(u, 0.0)
+                remaining_wh = metrics.battery_remaining.get(u, 0.0)
+                rate_wh = metrics.battery_consumption_rate_wh_per_h.get(u, 0.0)
+                if battery_voltage_v > 0.0:
+                    consumed_mah = (consumed_wh / battery_voltage_v) * 1000.0
+                    remaining_mah = (remaining_wh / battery_voltage_v) * 1000.0
+                    rate_mah = (rate_wh / battery_voltage_v) * 1000.0
+                else:
+                    consumed_mah = 0.0
+                    remaining_mah = 0.0
+                    rate_mah = 0.0
                 writer.writerow({
                     'scenario_name': metrics.scenario_name,
                     'num_uavs': metrics.num_uavs,
@@ -720,9 +817,12 @@ class PerformanceAnalyzer:
                     'soar_time_s': metrics.soar_time.get(u, 0.0),
                     'engine_time_s': metrics.engine_time.get(u, 0.0),
                     'motor_off_ratio_pct': metrics.motor_off_ratio.get(u, 0.0),
-                    'battery_consumed_ah': metrics.battery_consumed.get(u, 0.0),
-                    'battery_remaining_ah': metrics.battery_remaining.get(u, 0.0),
-                    'battery_rate_ah_per_h': metrics.battery_consumption_rate_ah_per_h.get(u, 0.0),
+                    'battery_consumed_wh': consumed_wh,
+                    'battery_remaining_wh': remaining_wh,
+                    'battery_rate_wh_per_h': rate_wh,
+                    'battery_consumed_mah': consumed_mah,
+                    'battery_remaining_mah': remaining_mah,
+                    'battery_rate_mah_per_h': rate_mah,
                     'potential_energy_variation_j': pe.get('variation_J', 0.0),
                     'potential_energy_thermal_gain_j': pe.get('thermal_gain_J', 0.0),
                     'potential_energy_engine_gain_j': pe.get('engine_gain_J', 0.0),
@@ -735,6 +835,9 @@ class PerformanceAnalyzer:
                     'soaring_ratio_pct': metrics.soaring_ratio.get(u, 0.0) * 100.0,
                     'd_min_m': metrics.min_separation_distance,
                     'n_coll': metrics.collisions_avoided,
+                    'objects_total': metrics.objects_total,
+                    'objects_detected': metrics.objects_detected,
+                    'objects_detected_uav': metrics.objects_per_uav.get(u, 0),
                     'eta_cov_pct': metrics.detection_rate * 100.0,
                     't_algo_avg_ms': metrics.algorithm_time_avg_ms,
                     't_algo_max_ms': metrics.algorithm_time_max_ms,
