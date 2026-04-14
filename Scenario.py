@@ -161,14 +161,6 @@ class ScenarioGenerator:
         print(f"GÉNÉRATION SCÉNARIO: {scenario_name}")
         print("="*70)
         
-        # Zone de test délimitée
-        test_zone = {
-            'x_min': params['X_lower_bound'] + 500,
-            'x_max': params['X_upper_bound'] - 500,
-            'y_min': params['Y_lower_bound'] + 500,
-            'y_max': params['Y_upper_bound'] - 500
-        }
-        
         # Destination commune éloignée du home (0,0)
         target_x = params['X_upper_bound'] * 0.65
         target_y = params['Y_upper_bound'] * 0.65
@@ -192,38 +184,6 @@ class ScenarioGenerator:
         print(f"✓ {num_obstacles} obstacles ")
         
         return start_positions, end_position, obstacles
-    
-    @staticmethod
-    def generate_endurance_scenario(nUAVs: int, params: dict, thermal_generator, obstacles) -> Tuple[dict, dict]:
-        """
-        Scénario d'endurance : évaluation exploitation thermiques
-        """
-        print("\n" + "="*70)
-        print("GÉNÉRATION SCÉNARIO: Test d'Endurance")
-        print("="*70)
-        
-        # Générer thermiques variées
-        num_thermals = np.random.randint(8, 15)
-        
-        # Créer thermiques avec paramètres variables
-        thermals = thermal_generator.generate_random_thermals(num_thermals, obstacles, params['current_simulation_time'])
-        
-        # Statistiques thermiques
-        thermal_stats = {
-            'total': len(thermals),
-            'weak': sum(1 for t in thermals.values() if t.get_strength() < 2.5),
-            'medium': sum(1 for t in thermals.values() if 2.5 <= t.get_strength() < 3.5),
-            'strong': sum(1 for t in thermals.values() if t.get_strength() >= 3.5)
-        }
-        
-        print(f"✓ {num_thermals} thermiques générées")
-        print(f"  - Faibles (<2.5 m/s): {thermal_stats['weak']}")
-        print(f"  - Moyennes (2.5-3.5 m/s): {thermal_stats['medium']}")
-        print(f"  - Fortes (>3.5 m/s): {thermal_stats['strong']}")
-        print(f"✓ Durée de vie: 5-15 min")
-        print(f"✓ Rayon: 80-200m")
-        
-        return thermals, thermal_stats
     
     @staticmethod
     def generate_coverage_scenario(nUAVs: int, params: dict, mission_duration: float) -> List[SurveillanceObject]:
@@ -296,8 +256,8 @@ class ScenarioGenerator:
         print(f"✓ Durée de vie: {lifetime_min/60:.1f}-{lifetime_max/60:.1f} min")
         print(f"✓ Objets early persistants: {hot_start_count}")
         print(f"✓ Pic estimé objets actifs simultanés: {peak_active}")
-        print(f"✓ Distribution spatiale: aléatoire")
-        print(f"✓ Champ de vision UAV: 150m")
+        print("✓ Distribution spatiale: aléatoire")
+        print("✓ Champ de vision UAV: 150m")
         
         return objects
 

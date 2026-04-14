@@ -18,32 +18,6 @@ import copy
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
-#not used
-def update_remaining_energy(flight_conditions, power_consumption, time_step):
-    """
-    Updates the remaining battery energy after a given flight duration.
-
-    Args:
-        flight_conditions (dict): Dictionary of current flight conditions.
-        power_consumption (float): Power consumption (W).
-        time_step (float or list): Flight duration(s) (s).
-
-    Returns:
-        list: List of remaining energy (Wh) after each time step.
-    """
-    remaining_energy = []
-
-    if isinstance(time_step, float):
-        time_step = [time_step]
-
-    n = len(time_step)
-
-    for i in range(n):
-        energy_cost = power_consumption * (time_step[i] / 3600)
-        remaining_energy.append(flight_conditions['battery_capacity'] - energy_cost)
-
-    return remaining_energy
-
 def lineXline(pA, pB):
     """
     Calculates the intersection point between two lines in 3D space.
@@ -113,7 +87,7 @@ def lineXline(pA, pB):
     except np.linalg.LinAlgError:
         # Matrice singulière : lignes parallèles
         return np.array([[np.inf], [np.inf], [np.inf]])
-    except Exception as e:
+    except Exception:
         # Toute autre erreur
         return np.array([[np.inf], [np.inf], [np.inf]])
 
@@ -278,7 +252,6 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
         #sin_descent = np.sin(descent_angle)
         current_z = FLT_data[Uidx]['Z']
         delta_z_up = abs(UBz - current_z)
-        delta_z_down = abs(current_z - LBz)
 
         # Pour chaque cap possible
         for i in range(len(H)):
@@ -614,10 +587,10 @@ def gotoWaypoint(FLT_track, FLT_conditions, GOAL_WPs, nUAVs, Uidx, params, UAV_d
         
         # En cas de solution invalide, conserver la dernière position valide
         if len(FLT_track[Uidx]['X']) > 0:
-            print(f"   ➡️  Conservation dernière position valide")
+            print("   ➡️  Conservation dernière position valide")
             return FLT_track, FLT_conditions, current_wp_idx
         else:
-            print(f"   ❌ Aucune position valide précédente - Erreur critique")
+            print("   ❌ Aucune position valide précédente - Erreur critique")
             return FLT_track, FLT_conditions, current_wp_idx
 
     FLT_track[Uidx]['X'].append(final_x)

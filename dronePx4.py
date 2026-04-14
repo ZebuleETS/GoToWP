@@ -7,8 +7,8 @@ import asyncio
 import sys
 import numpy as np
 from mavsdk import System
-from mavsdk.offboard import OffboardError, PositionNedYaw, VelocityNedYaw, AttitudeRate
-from mavsdk.telemetry import LandedState, FlightMode
+from mavsdk.offboard import OffboardError, PositionNedYaw, VelocityNedYaw
+from mavsdk.telemetry import FlightMode
 from mavsdk.action import OrbitYawBehavior
 import time
 import pymap3d as pm
@@ -18,7 +18,7 @@ from thermal import ThermalMap, detect_thermal_at_position
 from thermal_ros_bridge import ThermalROSBridge
 from compute import (convert_cylindrical_obstacles_to_polygons, find_nearest_waypoint, 
                      get_sink_rate, calculate_optimal_soaring_parameters)
-from Scenario import (TestScenario, PerformanceMetrics, SurveillanceObject, 
+from Scenario import (TestScenario, PerformanceMetrics,
                       ScenarioGenerator, PerformanceAnalyzer, select_scenario)
 
 
@@ -395,7 +395,7 @@ class PX4SITLBridge:
             print(f"[UAV {self.uav_id}] ❌ Recovery offboard échoué — passage en hold")
             try:
                 await self.drone.action.hold()
-            except:
+            except Exception:
                 pass
         return success
 
@@ -724,9 +724,9 @@ class PX4SITLBridge:
         
         try:
             await self.drone.offboard.stop()
-        except:
+        except Exception:
             pass
-    
+
     async def return_and_land(self):
         """Retour et atterrissage avec vérification RTL"""
         self.is_landing = True
@@ -1354,7 +1354,7 @@ class PX4SITLBridge:
             print(f"[UAV {self.uav_id}] ⚠️  Échec reprise offboard - tentative hold")
             try:
                 await self.drone.action.hold()
-            except:
+            except Exception:
                 pass
         
         return success
@@ -2003,17 +2003,8 @@ class MultiUAVController:
         
         if update_tasks:
             await asyncio.gather(*update_tasks)
-    
-    async def recover_rtl_all(self):
-        """Vérifier et récupérer le mode RTL pour tous les UAVs qui l'ont perdu.
-        
-        Même logique que recover_offboard_all, adaptée au RTL.
-        """
-        for u in range(self.nUAVs):
-            if u >= len(self.bridges):
-                continue
-            await self.bridges[u].check_and_recover_rtl()
 
+    
     async def land_all(self):
         """Atterrir tous les UAVs avec vérification RTL"""
         print("\n" + "="*70)
@@ -2075,19 +2066,6 @@ class MultiUAVController:
         
         print("\n✓ Tous les UAVs ont atterri!")
         
-    async def set_altitude_all(self, target_altitude):
-        """Définir l'altitude cible pour tous les UAVs"""
-        print(f"\nDéfinition de l'altitude cible à {target_altitude}m pour tous les UAVs...")
-        tasks = []
-        for u in range(self.nUAVs):
-            tasks.append(asyncio.create_task(self.bridges[u].drone.action.do_orbit(
-                100, 15, OrbitYawBehavior.HOLD_FRONT_TANGENT_TO_CIRCLE,
-                self.bridges[u].home_position.latitude_deg, 
-                self.bridges[u].home_position.longitude_deg, target_altitude
-            )))
-        await asyncio.gather(*tasks)
-        print(f"\n✓ Altitude cible définie à {target_altitude}m pour tous les UAVs!")
-
     async def start_thermal_orbit(self, uav_id, thermal, altitude, mode='evaluation', thermal_id=None):
         """
         Démarrer une orbite autour d'un thermique pour un UAV spécifique.
@@ -2512,11 +2490,6 @@ async def run_multi_uav_simulation():
         for u, pos in enumerate(home_positions):
             print(f"  UAV {u}: ({pos['X']:.1f}, {pos['Y']:.1f}, {pos['Z']:.1f})")
         
-        # Calculer le centroïde (centre de la zone, maintenant centrée sur home)
-        center_x = 0.0
-        center_y = 0.0
-        center_z = 400.0  # 400m au-dessus
-        
         # ========== ROS2 THERMAL BRIDGE (Gazebo ↔ Algorithm) ==========
         # Start the bridge BEFORE scenario generation so that thermals created
         # by the ROS2 thermal_generator_node (running in Gazebo) are received
@@ -2778,13 +2751,9 @@ async def run_multi_uav_simulation():
             print(f"  UAV {u}: {len(GOAL_WPs[u]['X'])} waypoints")
         
         current_wp_indices = {u: 1 for u in range(nUAVs)}
-        current_eval_wp_indices = {u: 1 for u in range(nUAVs)}
-        current_soar_wp_indices = {u: 1 for u in range(nUAVs)}
         
         # Décoller tous les UAVs
         await controller.arm_and_takeoff_all()
-        
-        #await controller.set_altitude_all(400.0)
 
         # Pour les scénarios de trajectoire optimale, rapprocher physiquement
         # les drones du premier waypoint avant de démarrer la simulation.
@@ -2825,7 +2794,7 @@ async def run_multi_uav_simulation():
         # Horloge temps réel (pour statistiques seulement)
         real_time_start = time.perf_counter()
         
-        print(f"\n⚙️  Configuration temps réel:")
+        print("\n⚙️  Configuration temps réel:")
         print(f"   Time step cible: {params['time_step']:.2f}s")
         print(f"   Bearing steps - Glide: {params['bearing_step_glide']}, Engine: {params['bearing_step_engine']}")
         print(f"   Speed steps - Glide: {params['speed_step_glide']}, Engine: {params['speed_step_engine']}")
@@ -3479,7 +3448,6 @@ async def run_multi_uav_simulation():
                 avg_algo_time = (total_decision_time / decision_calls) * 1000
                 
                 # Calculer le décalage de synchronisation
-                ideal_real_time = params['current_simulation_time']  # Idéalement 1:1
                 sync_ratio = params['current_simulation_time'] / total_real_time if total_real_time > 0 else 0
                 sync_delay = total_real_time - params['current_simulation_time']
                 
@@ -3773,7 +3741,7 @@ async def run_multi_uav_simulation():
         try:
             await controller.land_all()
             thermal_bridge.stop()
-        except:
+        except Exception:
             pass
 
 
