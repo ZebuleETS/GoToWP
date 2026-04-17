@@ -1,7 +1,9 @@
 **Auteurs**:
 
 Nicolas Plourde (nicolas.plourde.1@ens.etsmtl.ca), École de technologie supérieure
+
 Houssem-Eddine Mohamadi (houssem-eddine.mohamadi@etsmtl.net), École de technologie supérieure
+
 Nadjia Kara (https://www.etsmtl.ca/en/labs/imagin-lab), École de technologie supérieure
 
 **Contributeurs**:
