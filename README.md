@@ -6,7 +6,7 @@
 
 **Contributeurs**:
 
-Nicolas Plourde (nicolas.plourde.1@ens.etsmtl.ca), École de technologie supérieure
+- Nicolas Plourde (nicolas.plourde.1@ens.etsmtl.ca), École de technologie supérieure
 
 # GoToWP — Simulation Multi-UAV Planeurs Autonomes avec Thermiques
 
